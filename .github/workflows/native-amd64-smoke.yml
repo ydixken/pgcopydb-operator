@@ -1,0 +1,442 @@
+name: Native amd64 smoke
+
+# A smoke, not a guard qualification: one throwaway kind cluster inside the
+# dedicated runner's dind sidecar, one native spec per job in the suite's CNPG
+# mode. Every pin is the amd64 member of an index the arm64 M7 lock records,
+# or the amd64 publication of the db23902 manager and the qualified runner.
+
+on:
+  push:
+    branches: [ci/native-amd64-smoke-20261116]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-amd64-smoke
+  cancel-in-progress: false
+
+env:
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+  CNPG_URL: https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/refs/tags/v1.30.1/releases/cnpg-1.30.1.yaml
+  CNPG_SHA256: 37237f145d8138256ea25ae830f87759255665ff08f8d552fdd8224a5ec032fb
+  NODE_IMAGE: docker.io/kindest/node@sha256:597367624b4748b74b98e4fe2d661cd78063d02ecdaca702fd90572375b83e67
+  CNPG_IMAGE: ghcr.io/cloudnative-pg/cloudnative-pg@sha256:b0f9805bd5f98592e7320b5ea624dd10a7a6ef8e477df5650655c94f0b242497
+  PROVISIONER_IMAGE: docker.io/kindest/local-path-provisioner@sha256:77ab4466418c90f8a651cdec58ef864977eeb755c3ec83791c1d4b0d9259c938
+  # Dev publication of db23902, run 43714203150 (manager-publication-amd64).
+  MANAGER_IMAGE: ghcr.io/ydixken/pgcopydb-operator@sha256:7c1f3654cc9460121cc33953497627a7c968044f270fccf8f2162489a043a08e
+  RUNNER_IMAGE: ghcr.io/ydixken/rpgmigrate@sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412
+  TOOL_IMAGE: ghcr.io/ydixken/pgcopydb-operator/runner@sha256:4010429893c46f87c903d64f913d9d0b76b237d14a9685274b27a264f2d729b5
+  # yamllint disable-line rule:line-length
+  COLLECTOR_IMAGE: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector@sha256:83206d04cdc29e33b6ee7a97aeba37c1e956c76bd0dd804afe7398caf3fd29c8
+  POSTGRES_16_IMAGE: ghcr.io/cloudnative-pg/postgresql:16@sha256:921eb6964990c3468b1899b9188cc1d5c8a0417edf2b95ea37d85e9358a894f3
+  POSTGRES_18_IMAGE: ghcr.io/cloudnative-pg/postgresql:18@sha256:2cd40a7458922b0604ef6e24cad0b64c7d5f3aa148d393abfe87d9b8a38e3579
+  CLUSTER: native-smoke
+
+jobs:
+  smoke:
+    if: github.repository == 'ydixken/pgcopydb-operator'
+    runs-on: github-runner-rpgmigrate-native
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - {pair: "16:16", slug: 16-16, case: automatic-cutover, migration: e2e-follow-auto,
+             spec: "Migration runs an Automatic cutover to completion unattended"}
+          - {pair: "18:18", slug: 18-18, case: automatic-cutover, migration: e2e-follow-auto,
+             spec: "Migration runs an Automatic cutover to completion unattended"}
+          - {pair: "16:18", slug: 16-18, case: automatic-cutover, migration: e2e-follow-auto,
+             spec: "Migration runs an Automatic cutover to completion unattended"}
+          - {pair: "16:18", slug: 16-18, case: live-writer, migration: e2e-follow-load,
+             spec: "Migration loses no committed transaction when the source is written throughout"}
+    env:
+      KUBECONFIG: ${{ github.workspace }}/../kind.kubeconfig
+      ART: ${{ github.workspace }}/../smoke-artifact
+      PRIV: ${{ github.workspace }}/../smoke-private
+      PAIR: ${{ matrix.pair }}
+      CASE: ${{ matrix.case }}
+      MIGRATION: ${{ matrix.migration }}
+      SPEC: ${{ matrix.spec }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Record the runner and its Docker daemon
+        run: |
+          set -eu
+          mkdir -p "$ART/raw/logs" "$PRIV"
+          chmod 700 "$PRIV"
+          test "$(uname -m)" = x86_64
+          {
+            echo "run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT sha=$GITHUB_SHA pair=$PAIR case=$CASE"
+            uname -a; nproc; free -b
+            echo "container memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo n/a)"
+            echo "container cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo n/a)"
+            df -h "$GITHUB_WORKSPACE"
+            docker version
+            docker info
+          } > "$ART/runner-facts.txt" 2>&1
+          docker info --format 'driver={{.Driver}} cgroup={{.CgroupVersion}} cgroupdriver={{.CgroupDriver}}' |
+            tee -a "$ART/runner-facts.txt"
+
+      - name: Install the pinned kind
+        run: |
+          set -eu
+          curl -fsSLo "$RUNNER_TEMP/kind" "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          echo "$KIND_SHA256  $RUNNER_TEMP/kind" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/kind"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Build the e2e test binary before kind takes the memory
+        run: go test -c -o "$RUNNER_TEMP/e2e.test" ./test/e2e
+
+      - name: Create the kind cluster
+        # The work claim gets a runner-owned 0700 root, as the guard's seeded hostPath gives it: the
+        # native engine refuses kind's root-owned 0777 directory. The kind helper image has no chown.
+        run: |
+          set -eu
+          sed -e "s#docker.io/kindest/local-path-provisioner:v20260820-69b56db7#$PROVISIONER_IMAGE#" \
+              -e "s#docker.io/kindest/local-path-helper:v20260131-7181c60a#$TOOL_IMAGE#g" \
+              test/e2e/kind/default-storage.yaml > "$RUNNER_TEMP/storage.yaml"
+          python3 - "$RUNNER_TEMP/storage.yaml" <<'PY'
+          import sys
+          path = sys.argv[1]
+          text = open(path).read()
+          old_setup = '    mkdir -m 0777 -p "$VOL_DIR"\n'
+          new_setup = ('    case "$VOL_DIR" in\n'
+                       '      */pvc-*_pgcopydb-e2e_e2e-*-work)\n'
+                       '        mkdir -m 0700 "$VOL_DIR"; chown 65532:65532 "$VOL_DIR" ;;\n'
+                       '      *) mkdir -m 0777 -p "$VOL_DIR" ;;\n'
+                       '    esac\n')
+          old_pod = '    spec:\n      priorityClassName: system-node-critical\n'
+          new_pod = old_pod + '      securityContext:\n        runAsUser: 0\n        runAsGroup: 0\n'
+          for old, new in ((old_setup, new_setup), (old_pod, new_pod)):
+              if text.count(old) != 1:
+                  sys.exit('storage manifest anchor not found exactly once')
+              text = text.replace(old, new)
+          if 'v2026' in text:
+              sys.exit('storage manifest still names a tag')
+          open(path, 'w').write(text)
+          PY
+          cat > "$RUNNER_TEMP/cluster.yaml" <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          kubeadmConfigPatches:
+            - |
+              kind: KubeletConfiguration
+              podPidsLimit: 4096
+          nodes:
+            - role: control-plane
+              extraMounts:
+                - hostPath: $RUNNER_TEMP/storage.yaml
+                  containerPath: /kind/manifests/default-storage.yaml
+                  readOnly: true
+            - role: worker
+            - role: worker
+          EOF
+          cp "$RUNNER_TEMP/storage.yaml" "$RUNNER_TEMP/cluster.yaml" "$ART/"
+          kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --config "$RUNNER_TEMP/cluster.yaml" \
+            --kubeconfig "$KUBECONFIG" --wait 300s
+          chmod 600 "$KUBECONFIG"
+          # 6 CPUs and 9 GiB across three nodes stay inside the pod's 6 CPU request and 10Gi limit.
+          for node in $(kind get nodes --name "$CLUSTER"); do
+            docker update --cpus=2 --memory=3g --memory-swap=3g "$node" >/dev/null
+            echo "$node $(docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' "$node")" >> "$ART/node-limits.txt"
+          done
+          server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          case "$server" in https://127.0.0.1:*) ;; *) echo "::error::kubeconfig does not point at the local kind API"; exit 1;; esac
+          test "$(kubectl config current-context)" = "kind-$CLUSTER"
+          kubectl get nodes -o wide | tee "$ART/nodes.txt"
+          test "$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.architecture}{"\n"}{end}' | sort -u)" = amd64
+          docker exec "$CLUSTER-control-plane" sh -c 'containerd config dump | grep -m1 snapshotter; df -hT /var' \
+            >> "$ART/runner-facts.txt" 2>&1 || true
+
+      - name: Pull and check every workload image by digest on every node
+        run: |
+          set -eu
+          images="$MANAGER_IMAGE $RUNNER_IMAGE $TOOL_IMAGE $COLLECTOR_IMAGE $CNPG_IMAGE $PROVISIONER_IMAGE"
+          case "$PAIR" in
+            16:16) images="$images $POSTGRES_16_IMAGE";;
+            18:18) images="$images $POSTGRES_18_IMAGE";;
+            16:18) images="$images $POSTGRES_16_IMAGE $POSTGRES_18_IMAGE";;
+          esac
+          for node in $(kind get nodes --name "$CLUSTER"); do
+            for image in $images; do
+              docker exec "$node" crictl pull "$image" >/dev/null &
+            done
+          done
+          wait
+          for node in $(kind get nodes --name "$CLUSTER"); do
+            for image in $images; do
+              want="${image#*@}"
+              docker exec "$node" crictl inspecti -o json "$image" | python3 -c '
+          import json, sys
+          want = sys.argv[1]
+          status = json.load(sys.stdin)["status"]
+          if not any(d.endswith("@" + want) for d in status.get("repoDigests", [])):
+              sys.exit("image digest mismatch")
+          print(sys.argv[2], status["id"], want)' "$want" "$node" >> "$ART/node-images.txt"
+            done
+          done
+
+      - name: Install the pinned CloudNativePG operator and the Migration CRD
+        run: |
+          set -eu
+          curl -fsSLo "$RUNNER_TEMP/cnpg.yaml" "$CNPG_URL"
+          echo "$CNPG_SHA256  $RUNNER_TEMP/cnpg.yaml" | sha256sum -c -
+          test "$(grep -c 'ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1' "$RUNNER_TEMP/cnpg.yaml")" = 2
+          sed -i "s#ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1#$CNPG_IMAGE#g" "$RUNNER_TEMP/cnpg.yaml"
+          kubectl apply --server-side -f "$RUNNER_TEMP/cnpg.yaml" > "$ART/cnpg-apply.txt"
+          kubectl -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=300s
+          kubectl apply --server-side -f config/crd/bases/pgcopydb-operator.io_migrations.yaml
+          kubectl wait --for=condition=Established crd/migrations.pgcopydb-operator.io --timeout=120s
+
+      - name: Start the watches and log followers
+        # The single-quoted scripts expand inside the background shells, on purpose.
+        run: |
+          set -eu
+          watch() {
+            out=$1; shift
+            # shellcheck disable=SC2016
+            nohup sh -c 'while [ ! -f "$PRIV/stop" ]; do kubectl get "$@" -w -o json; sleep 1; done' sh "$@" \
+              >> "$out" 2>/dev/null &
+            echo $! >> "$PRIV/pids"
+          }
+          watch "$ART/raw/migrations.json" migrations.pgcopydb-operator.io -A
+          watch "$ART/raw/events.json" events -A
+          watch "$ART/raw/jobs.json" jobs -A
+          watch "$ART/raw/pods.json" pods -A
+          watch "$PRIV/secrets.json" secrets -A
+          # shellcheck disable=SC2016
+          nohup sh -c '
+            touch "$PRIV/followed"
+            while [ ! -f "$PRIV/stop" ]; do
+              kubectl get pods -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null |
+                grep -E "^(pgcopydb-e2e|pgcopydb-e2e-x|pgcopydb-e2e-system|cnpg-system) " | while read -r ns pod; do
+                  grep -qx "$ns $pod" "$PRIV/followed" && continue
+                  echo "$ns $pod" >> "$PRIV/followed"
+                  (for i in $(seq 1 300); do
+                     kubectl logs -f --all-containers --prefix --timestamps -n "$ns" "$pod" \
+                       >> "$ART/raw/logs/$ns.$pod.log" 2>/dev/null && break
+                     kubectl get pod -n "$ns" "$pod" >/dev/null 2>&1 || break
+                     sleep 2
+                   done) &
+                done
+              sleep 2
+            done' >/dev/null 2>&1 &
+          echo $! >> "$PRIV/pids"
+
+      - name: Run ${{ matrix.case }} on ${{ matrix.pair }} in the suite's CNPG mode
+        working-directory: test/e2e
+        env:
+          E2E_CONTEXT: kind-native-smoke
+          E2E_ENGINE: rpgmigrate
+          E2E_SMALL: "true"
+          E2E_SCALE: "0.01"
+          E2E_CNPG_INSTANCES: "1"
+          E2E_KEEP_FIXTURES: "false"
+          E2E_FORCE: "false"
+          E2E_STRESS: "false"
+          E2E_MANAGE_NAMESPACES: "true"
+        run: |
+          set -eu
+          export E2E_PG_SOURCE="${PAIR%%:*}" E2E_PG_TARGET="${PAIR##*:}"
+          export E2E_MANAGER_IMAGE="$MANAGER_IMAGE" E2E_RUNNER_IMAGE="$RUNNER_IMAGE" \
+            E2E_SEED_IMAGE="$TOOL_IMAGE" E2E_TOOL_IMAGE="$TOOL_IMAGE" E2E_COLLECTOR_IMAGE="$COLLECTOR_IMAGE" \
+            E2E_POSTGRES_16_IMAGE="$POSTGRES_16_IMAGE" E2E_POSTGRES_18_IMAGE="$POSTGRES_18_IMAGE"
+          set -o pipefail
+          "$RUNNER_TEMP/e2e.test" -test.run '^TestE2E$' -test.v -test.timeout 55m \
+            -ginkgo.v -ginkgo.timeout=50m -ginkgo.label-filter=native -ginkgo.fail-on-empty \
+            -ginkgo.focus="^${SPEC}\$" \
+            -ginkgo.json-report="$ART/ginkgo-report.json" -ginkgo.junit-report="$ART/junit.xml" \
+            2>&1 | tee "$ART/raw/suite.log"
+
+      - name: Stop the watches and check the outcome
+        id: outcome
+        if: always()
+        run: |
+          set -u
+          touch "$PRIV/stop"
+          sleep 3
+          xargs -r kill < "$PRIV/pids" 2>/dev/null || true
+          pkill -f 'kubectl logs -f' 2>/dev/null || true
+          kubectl get pods -A -o wide > "$ART/pods-final.txt" 2>&1 || true
+          kubectl get pv,pvc -A -o wide > "$ART/volumes-final.txt" 2>&1 || true
+          python3 - <<'PY'
+          import json, os, sys
+          art, migration, spec = os.environ['ART'], os.environ['MIGRATION'], os.environ['SPEC']
+
+          def stream(name):
+              path = os.path.join(art, 'raw', name)
+              if not os.path.exists(path):
+                  return []
+              text, decoder, i, out = open(path, errors='replace').read(), json.JSONDecoder(), 0, []
+              while True:
+                  while i < len(text) and text[i].isspace():
+                      i += 1
+                  if i >= len(text):
+                      return out
+                  try:
+                      obj, i = decoder.raw_decode(text, i)
+                  except ValueError:
+                      return out
+                  out.append(obj)
+
+          problems, summary = [], {'run_id': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                                   'sha': os.environ['GITHUB_SHA'], 'pair': os.environ['PAIR'], 'case': os.environ['CASE'],
+                                   'spec': spec, 'label': 'smoke, not a guard qualification'}
+          summary['images'] = {k: os.environ[k] for k in ('NODE_IMAGE', 'CNPG_IMAGE', 'PROVISIONER_IMAGE', 'MANAGER_IMAGE',
+                               'RUNNER_IMAGE', 'TOOL_IMAGE', 'COLLECTOR_IMAGE', 'POSTGRES_16_IMAGE', 'POSTGRES_18_IMAGE')}
+          try:
+              suites = json.load(open(os.path.join(art, 'ginkgo-report.json')))
+          except (OSError, ValueError):
+              suites = []
+          if len(suites) != 1:
+              problems.append('no single Ginkgo suite report')
+          else:
+              suite = suites[0]
+              its = [r for r in suite.get('SpecReports', []) if r.get('LeafNodeType') == 'It']
+              ran = [r for r in its if r.get('State') != 'skipped']
+              full =[' '.join((r.get('ContainerHierarchyTexts') or []) + [r.get('LeafNodeText', '')]) for r in ran]
+              others = [r for r in suite.get('SpecReports', []) if r.get('LeafNodeType') != 'It' and r.get('State') != 'passed']
+              summary['suite'] = {'succeeded': suite.get('SuiteSucceeded'), 'ran': full,
+                                  'states': [r.get('State') for r in ran], 'failed_setup_nodes': [r.get('LeafNodeType') for r in others],
+                                  'run_time_seconds': suite.get('RunTime', 0) / 1e9}
+              if suite.get('SuiteSucceeded') is not True or full != [spec] or [r.get('State') for r in ran] != ['passed'] or others:
+                  problems.append('suite did not pass exactly the selected spec')
+
+          finals = [m for m in stream('migrations.json') if m.get('kind') == 'Migration' and
+                    m.get('metadata', {}).get('name') == migration and m.get('metadata', {}).get('namespace') == 'pgcopydb-e2e']
+          completed = [m for m in finals if m.get('status', {}).get('phase') == 'Completed']
+          phases = []
+          for m in finals:
+              phase = m.get('status', {}).get('phase')
+              if phase and (not phases or phases[-1] != phase):
+                  phases.append(phase)
+          summary['phases'] = phases
+          if not completed:
+              problems.append('the Migration was never observed Completed')
+          else:
+              m = completed[-1]
+              conditions = {c['type']: c for c in m['status'].get('conditions', [])}
+              pick = lambda c: {k: c.get(k) for k in ('status', 'reason', 'message', 'lastTransitionTime')}
+              summary['migration'] = {'uid': m['metadata'].get('uid'), 'engine': m['spec'].get('engine'),
+                                      'runner_image': m['spec'].get('runner', {}).get('image'),
+                                      'conditions': {k: pick(v) for k, v in conditions.items()},
+                                      'replication': m['status'].get('replication'),
+                                      'verification': m['status'].get('verification'),
+                                      'attempts': m['status'].get('attempts')}
+              want = {'Complete': ('True', None), 'CutoverCompleted': ('True', 'NativeDrainConfirmed'), 'Verified': ('True', None)}
+              for kind, (status, reason) in want.items():
+                  c = conditions.get(kind, {})
+                  if c.get('status') != status or (reason and c.get('reason') != reason):
+                      problems.append(f'{kind} is not {status}' + (f'/{reason}' if reason else ''))
+              if m['spec'].get('engine') != 'rpgmigrate' or m['spec'].get('runner', {}).get('image') != os.environ['RUNNER_IMAGE']:
+                  problems.append('the Migration did not run the native engine on the amd64 runner')
+              uid = m['metadata'].get('uid')
+              jobs = {}
+              for j in stream('jobs.json'):
+                  owners = [o.get('uid') for o in j.get('metadata', {}).get('ownerReferences', [])]
+                  if j.get('kind') == 'Job' and uid in owners:
+                      jobs[j['metadata']['name']] = j.get('status', {}).get('succeeded', 0) or 0
+              summary['owned_jobs_succeeded'] = jobs
+              if not any('cleanup' in name and n >= 1 for name, n in jobs.items()):
+                  problems.append('no owned cleanup Job was observed succeeded')
+
+          images = {}
+          for p in stream('pods.json'):
+              ns = p.get('metadata', {}).get('namespace', '')
+              if p.get('kind') != 'Pod' or not ns.startswith(('pgcopydb-e2e', 'cnpg-system')):
+                  continue
+              for c in p.get('status', {}).get('containerStatuses', []) + p.get('status', {}).get('initContainerStatuses', []):
+                  if c.get('imageID'):
+                      images.setdefault(c['image'], set()).add(c['imageID'].rsplit('@', 1)[-1])
+          summary['observed_image_ids'] = {k: sorted(v) for k, v in sorted(images.items())}
+          for key in ('MANAGER_IMAGE', 'RUNNER_IMAGE'):
+              digest = os.environ[key].rsplit('@', 1)[-1]
+              seen = [ids for image, ids in images.items() if image.endswith(digest) or digest in ids]
+              if not seen or any(ids != {digest} for ids in seen):
+                  problems.append(f'{key} was not observed running at its amd64 digest')
+          summary['problems'] = problems
+          summary['result'] = 'PASS' if not problems else 'FAIL'
+          json.dump(summary, open(os.path.join(art, 'summary.json'), 'w'), indent=1, sort_keys=True)
+          print(json.dumps({'result': summary['result'], 'problems': problems, 'phases': summary.get('phases')}))
+          sys.exit(1 if problems else 0)
+          PY
+
+      - name: Delete the kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          {
+            echo "kind clusters: $(kind get clusters 2>&1 | tr '\n' ' ')"
+            echo "containers:"; docker ps -a --format '{{.ID}} {{.Image}} {{.Names}}'
+            echo "volumes:"; docker volume ls -q
+          } > "$ART/cleanup.txt" 2>&1
+          cat "$ART/cleanup.txt"
+
+      - name: Redact and scan the artifact for credentials
+        id: scan
+        if: always()
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import base64, json, os, re, sys
+          art, priv = os.environ['ART'], os.environ['PRIV']
+          values = set()
+          path = os.path.join(priv, 'secrets.json')
+          if os.path.exists(path):
+              text, decoder, i = open(path, errors='replace').read(), json.JSONDecoder(), 0
+              while True:
+                  while i < len(text) and text[i].isspace():
+                      i += 1
+                  if i >= len(text):
+                      break
+                  try:
+                      obj, i = decoder.raw_decode(text, i)
+                  except ValueError:
+                      break
+                  for v in (obj.get('data') or {}).values():
+                      try:
+                          raw = base64.b64decode(v).decode('utf-8', 'replace')
+                      except ValueError:
+                          continue
+                      values.update(s for s in {raw, raw.strip(), v} if len(s) >= 8)
+          rules = [(re.compile(r'(?i)(password|passwd|pgpassword)(["\']?\s*[:=]\s*["\']?)[^\s"\',&}]+'), r'\1\2[REDACTED]'),
+                   (re.compile(r'(postgres(?:ql)?://[^:/@\s]+:)[^@\s]+@'), r'\1[REDACTED]@'),
+                   (re.compile(r'(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*'), r'\1[REDACTED]')]
+          leftovers = re.compile(r'BEGIN [A-Z ]*PRIVATE KEY|client-key-data|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_')
+          bad = []
+          for root, _, files in os.walk(art):
+              for name in files:
+                  p = os.path.join(root, name)
+                  text = open(p, errors='replace').read()
+                  for v in sorted(values, key=len, reverse=True):
+                      text = text.replace(v, '[REDACTED]')
+                  for rx, sub in rules:
+                      text = rx.sub(sub, text)
+                  open(p, 'w').write(text)
+                  if leftovers.search(text) or any(v in text for v in values):
+                      bad.append(os.path.relpath(p, art))
+          print(f'secret values checked: {len(values)}; files flagged: {bad}')
+          if bad:
+              sys.exit(1)
+          PY
+          rm -rf "$PRIV"
+
+      - name: Upload the smoke evidence
+        if: always() && steps.scan.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-amd64-smoke-${{ matrix.case }}-${{ matrix.slug }}
+          path: ${{ github.workspace }}/../smoke-artifact
+          retention-days: 14
