@@ -2,7 +2,7 @@ name: Kind offline contracts
 
 on:
   push:
-    branches: [feat/rpgmigrate-native-operator]
+    branches: [feat/rpgmigrate-native-operator, feat/native-operator-m8-20261116]
   pull_request:
 
 permissions:
