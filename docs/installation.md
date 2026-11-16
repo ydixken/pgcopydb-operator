@@ -49,6 +49,21 @@ Config maps get no `delete`, so the claims have a rule of their own:
   verbs: ["create", "get", "list", "watch"]
 ```
 
+## Migration edit rights
+
+Read this before you grant users rights on `migrations`, for example through the `migration-editor-role` ClusterRole in `config/rbac/`.
+
+> [!warning]
+> A user who can create a Migration can send any Secret key in its namespace to a host that the user selects.
+> In the inline connection form, the Migration sets `host` and `passwordSecretRef` names the Secret key.
+> The runner puts the password of that key into the passfile line for that host, and libpq sends it to that host.
+> When the server asks for cleartext password authentication, libpq sends the password in cleartext.
+> The same user also sets `sslMode`, so the TLS settings do not stop this.
+> This is true for both engines.
+> On the pgcopydb engine, a user who can create or update a Migration can also set `spec.runner.image`.
+> The Jobs then run that image with the Secrets that the Migration references, which gives the same access.
+> Grant `create`, `update` or `patch` on `migrations` only to users that you trust with all Secrets in that namespace.
+
 ## CRD lifecycle
 
 The CRD renders as a regular chart template, so `helm upgrade` updates it in place.
