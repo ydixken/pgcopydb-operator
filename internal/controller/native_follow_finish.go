@@ -22,7 +22,7 @@ func (r *MigrationReconciler) finishNativeFollow(ctx context.Context, m, base *v
 	if err != nil {
 		return ctrl.Result{}, errNativeFollowCompletion
 	}
-	if handled, result, err := r.reconcileNativeCloneReport(ctx, m, base, worker, pvc, original); handled {
+	if handled, result, err := r.reconcileNativeFinishEntry(ctx, m, base, worker, pvc, original); handled {
 		return result, err
 	}
 	if !r.nativeVerificationOriginalUnchanged(ctx, entry, worker, pvc, original) {

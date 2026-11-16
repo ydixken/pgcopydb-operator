@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -12,7 +13,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -237,4 +241,99 @@ func nativeCompareSample(p native.ComparisonProgress) pgcopydb.CompareProgress {
 		PlannedTables: p.Tables, ComparedTables: p.Tables, PlannedBytes: p.Bytes, ComparedBytes: p.Bytes,
 		ComparedRows: p.Rows, DifferingTables: p.DifferingTables, ElapsedMs: p.ElapsedMs, Final: true,
 	}
+}
+
+// reconcileNativeFinishEntry runs the report row of the W table and the C table before any helper Job of a finish pass.
+func (r *MigrationReconciler) reconcileNativeFinishEntry(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) (bool, ctrl.Result, error) {
+	if handled, result, err := r.reconcileNativeCloneReport(ctx, m, base, worker, pvc, original); handled {
+		return handled, result, err
+	}
+	return r.reconcileNativeCompares(ctx, m, base, worker, pvc)
+}
+
+// reconcileNativeCompares is the finish column of the C table, run before any helper Job of the pass.
+// A running pinned compare is polled alone; an unpinned, drifted, pod-less or vanished compare is
+// dropped and unpinned, never read, so a later pass pins a fresh one after its own drain observation.
+func (r *MigrationReconciler) reconcileNativeCompares(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (bool, ctrl.Result, error) {
+	if r.APIReader == nil || r.Scheme == nil || m == nil || worker == nil || pvc == nil {
+		return true, ctrl.Result{}, native.ErrNativeComparisonUnavailable
+	}
+	if verificationRequested(m) && !m.Spec.Verification.Rehearsal {
+		for _, check := range enabledChecks(m) {
+			if handled, result, err := r.reconcileNativeCompare(ctx, m, base, worker, pvc, check); handled {
+				return handled, result, err
+			}
+		}
+	}
+	// The worker table leaves an EvidenceUnavailable hold to this path, which clears it once it proceeds.
+	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionBlocked) {
+		desired := m.DeepCopy()
+		r.clearNativeBlocked(desired)
+		return r.patchNativeWorkerState(ctx, m, base, desired)
+	}
+	return false, ctrl.Result{}, nil
+}
+
+func (r *MigrationReconciler) reconcileNativeCompare(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, check string) (bool, ctrl.Result, error) {
+	expected, err := buildNativeCompareJob(m, pvc, worker, r.RPGMigrateRunnerImage, check)
+	if err != nil || controllerutil.SetControllerReference(m, expected, r.Scheme) != nil {
+		return true, ctrl.Result{}, native.ErrNativeComparisonUnavailable
+	}
+	pin := nativeVerificationJobUID(m, check)
+	job := &batchv1.Job{}
+	err = r.APIReader.Get(ctx, client.ObjectKeyFromObject(expected), job)
+	switch {
+	case apierrors.IsNotFound(err) && pin == "":
+		// None: ensureNativeVerification creates and pins it after this pass's drain observation.
+		return false, ctrl.Result{}, nil
+	case apierrors.IsNotFound(err):
+		return r.dropNativeCompare(ctx, m, base, check, nativeGoneJob(m.Namespace, expected.Name, types.UID(pin)), true)
+	case err != nil:
+		return true, ctrl.Result{}, native.ErrNativeComparisonUnavailable
+	case !nativeEvidenceOwnedBy(job, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()):
+		return r.holdNative(ctx, m, base, v1beta1.ReasonEvidenceUnavailable, fmt.Sprintf(
+			"Job %s is not controlled by this Migration; native verification waits until it is gone, and the operator neither reads nor removes it", job.Name))
+	case !job.DeletionTimestamp.IsZero():
+		return r.holdNative(ctx, m, base, v1beta1.ReasonEvidenceUnavailable, fmt.Sprintf(
+			"Compare Job %s is being deleted; native verification waits until it and its pods are gone", job.Name))
+	case string(job.UID) != pin:
+		// Owned but not pinned, such as after a lost receipt: never read, only replaced.
+		return r.dropNativeCompare(ctx, m, base, check, job, false)
+	case !nativePreflightJobMatches(expected, job):
+		return r.dropNativeCompare(ctx, m, base, check, job, true)
+	}
+	pod, err := r.nativePreflightPod(ctx, job)
+	if err != nil || pod != nil && !nativePreflightPodMatches(job, pod) {
+		return true, ctrl.Result{}, native.ErrNativeComparisonUnavailable
+	}
+	switch {
+	case !nativeEvidenceWorkerComplete(job) && !nativePreflightJobFailed(job):
+		// Lifecycle 6: the pin stamps the drain observation that preceded it, so no helper runs while it compares.
+		return true, ctrl.Result{RequeueAfter: pollInterval}, nil
+	case pod == nil:
+		return r.dropNativeCompare(ctx, m, base, check, job, true)
+	}
+	// Pinned and ended with its pod: ensureNativeVerification reads it after the drain observation.
+	return false, ctrl.Result{}, nil
+}
+
+// dropNativeCompare drops a compare Job by UID and, when unpin is set, then clears its pin.
+func (r *MigrationReconciler) dropNativeCompare(ctx context.Context, m, base *v1beta1.Migration, check string, job *batchv1.Job, unpin bool) (bool, ctrl.Result, error) {
+	done, err := r.dropNativeWorker(ctx, m, job)
+	if err != nil {
+		return true, ctrl.Result{}, native.ErrNativeComparisonUnavailable
+	}
+	if !done {
+		return true, ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+	if !unpin {
+		return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
+	desired := m.DeepCopy()
+	if check == compareSchema {
+		desired.Status.NativeSchemaJobUID = ""
+	} else {
+		desired.Status.NativeDataJobUID = ""
+	}
+	return r.patchNativeWorkerState(ctx, m, base, desired)
 }

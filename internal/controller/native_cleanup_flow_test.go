@@ -75,6 +75,8 @@ type nativeFinishFixture struct {
 	editResult              func(string, map[string]any)
 	afterEffect             func()
 	afterRelay              func(string)
+	// dropPinned lets a test drop a pinned compare (drifted or pod-less) before the final status.
+	dropPinned bool
 }
 
 func newNativeFinishFixture(t *testing.T) *nativeFinishFixture {
@@ -251,8 +253,10 @@ func (f *nativeFinishFixture) delete(ctx context.Context, c client.WithWatch, ob
 	}
 
 	if finishJobKind(job.Name) == finishVerificationJobKind {
+		// An unpinned compare is never read, so finish may drop it before the final status (C table).
 		live := &v1beta1.Migration{}
-		if err := c.Get(ctx, client.ObjectKeyFromObject(f.m), live); err != nil || !meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionComplete) {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(f.m), live); err != nil || !meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionComplete) &&
+			(string(job.UID) == live.Status.NativeSchemaJobUID || string(job.UID) == live.Status.NativeDataJobUID) && !f.dropPinned {
 			f.t.Error("verification helper disposed before durable final status")
 			return errBoom
 		}

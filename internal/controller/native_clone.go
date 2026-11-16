@@ -19,7 +19,7 @@ func (r *MigrationReconciler) finishNativeClone(ctx context.Context, m, base *v1
 	if err != nil {
 		return ctrl.Result{}, errNativeCloneReport
 	}
-	if handled, result, err := r.reconcileNativeCloneReport(ctx, m, base, worker, pvc, original); handled {
+	if handled, result, err := r.reconcileNativeFinishEntry(ctx, m, base, worker, pvc, original); handled {
 		return result, err
 	}
 	done, err := r.ensureNativeVerification(ctx, m, worker, pvc)

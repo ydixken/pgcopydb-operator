@@ -258,6 +258,11 @@ func TestNativeFollowVerificationRecapture(t *testing.T) {
 			} else {
 				job.UID = "replacement-comparison"
 				f.replace(job)
+				// An owned compare that is not the pinned one is never read: finish drops it (C table).
+				if _, err := nativeFinish(t, f); err != nil || f.patches != 0 || !slices.Contains(f.deleted, finishVerificationJobKind) || len(f.created) != 0 || f.current().Status.Phase == v1beta1.PhaseCompleted {
+					t.Fatalf("replacement helper was read or kept: err=%v deleted=%v created=%v", err, f.deleted, f.created)
+				}
+				return
 			}
 			if _, err := nativeFinish(t, f); err == nil {
 				t.Fatal("cached Passed or replacement helper supplied comparison authority")
