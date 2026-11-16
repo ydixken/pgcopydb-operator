@@ -165,7 +165,8 @@ A native follow spec proves its cleanup positively.
 The operator deletes the `rpgmigrate-cleanup-<operation>` Job before the Migration completes, so the suite watches the namespace's Jobs from the first native Migration on and requires one owned by the Migration to have succeeded.
 It also requires the status to record the finalized worker, no `rpgm_s_<run>_` slot, `rpgm_p_<run>_` publication or source `_rpgmigrate_<run>` schema, and the target `_rpgmigrate_<run>` schema that cleanup retains.
 The shared slot and origin counts follow the engine, and each refuses to count when its filter would not match a name that engine creates.
-A native fresh clone expects the seeded large objects to stay on the source, because native runs with large objects off.
+A native Migration keeps only its spec's table jobs and runs the other clone options at the operator defaults: binary COPY with text fallback, split parts and large objects.
+Admission requires the runner to advertise `copy.binary_fallback`, `copy.split` and `copy.large_objects` for them, and a native fresh clone expects every seeded large object on the target.
 A native drain has no `<name>-verify` Job, so live-writer and automatic-cutover require `NativeDrainConfirmed`, no `drain` progress item, and one completed row in the target `_rpgmigrate_<run>.checkpoint` whose drain ends at `status.replication.endpos` with a witness the engine admits.
 Its data progress item must come from the pinned native compare helper, observed no earlier than the compare's recorded completion.
 The guard binds the engine, pair and full spec text into `suite-input.json`, and `TestE2E` focuses on exactly that spec, so a native run never executes a second one.

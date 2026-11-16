@@ -60,7 +60,6 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -246,13 +245,10 @@ func (c featureLabelingClient) Create(
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-// nativeClone keeps only what native admission qualifies: table jobs, with
-// DropIfExists, filters, binary COPY, split parts and large objects explicitly off.
+// nativeClone keeps only the spec's table jobs, so binary COPY, split parts and
+// large objects run at the operator defaults, the profile a user gets.
 func nativeClone(c v1beta1.CloneOptions) v1beta1.CloneOptions {
-	return v1beta1.CloneOptions{
-		TableJobs: c.TableJobs, UseCopyBinary: ptr.To(false),
-		SplitTablesLargerThan: ptr.To(resource.MustParse("0")), Skip: []v1beta1.SkipOption{"largeObjects"},
-	}
+	return v1beta1.CloneOptions{TableJobs: c.TableJobs}
 }
 
 const sslVerifyFull = "verify-full"

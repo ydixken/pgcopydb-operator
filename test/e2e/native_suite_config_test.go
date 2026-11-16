@@ -61,10 +61,8 @@ func legacyCloneFixture() v1beta1.CloneOptions {
 func TestNativeCloneShape(t *testing.T) {
 	t.Setenv("E2E_ENGINE", string(v1beta1.MigrationEngineRPGMigrate))
 	got := createThroughSuiteClient(t, legacyCloneFixture())
-	want := v1beta1.CloneOptions{
-		TableJobs: 3, UseCopyBinary: ptr.To(false), SplitTablesLargerThan: ptr.To(resource.MustParse("0")),
-		Skip: []v1beta1.SkipOption{"largeObjects"},
-	}
+	// Unset binary, split and skip fields are the operator defaults: binary with fallback, split parts, large objects.
+	want := v1beta1.CloneOptions{TableJobs: 3}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("native clone = %+v, want %+v", got, want)
 	}
