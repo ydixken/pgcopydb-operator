@@ -346,6 +346,68 @@ func (r *MigrationReconciler) stopOrDropNativeWorker(ctx context.Context, m *v1b
 	return r.dropNativeWorker(ctx, m, worker)
 }
 
+// nativeWorkerStartSeen is the operator's own positive evidence that a container of job started: the
+// Job counts a ready or succeeded pod, or a pod carrying its UID (owner or controller-uid label) shows
+// a container with an ID, a running or terminated state, or a restart.
+func (r *MigrationReconciler) nativeWorkerStartSeen(ctx context.Context, job *batchv1.Job) (bool, error) {
+	if job.Status.Succeeded != 0 || job.Status.Ready != nil && *job.Status.Ready != 0 {
+		return true, nil
+	}
+	pods, err := r.nativePreflightPods(ctx, job.Namespace)
+	if err != nil {
+		return false, err
+	}
+	for i := range pods {
+		p := &pods[i]
+		if !slices.ContainsFunc(p.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == job.UID }) &&
+			p.Labels[batchv1.ControllerUidLabel] != string(job.UID) && p.Labels[nativeWorkerLegacyControllerLabel] != string(job.UID) {
+			continue
+		}
+		for _, c := range append(slices.Clone(p.Status.InitContainerStatuses), p.Status.ContainerStatuses...) {
+			if c.ContainerID != "" || c.State.Running != nil || c.State.Terminated != nil || c.RestartCount != 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// nativeWorkerStartUnseen reports that no worker container of m has been seen to start, so the next
+// attempt, nativeFreshAttempt, starts over with --restart (dj): the receipt of a fresh attempt moves the
+// fresh attempt one past it, and a seen start pins it to the current attempt.
+func nativeWorkerStartUnseen(m *v1beta1.Migration) bool {
+	return nativeFreshAttempt(m) > m.Status.Attempts
+}
+
+// markNativeWorkerStarted records a seen start: every attempt after the current one resumes.
+func markNativeWorkerStarted(m *v1beta1.Migration) {
+	if !nativeWorkerStartUnseen(m) {
+		return
+	}
+	m.Status.NativeFreshAttempt = 0
+	if m.Status.Attempts > 1 {
+		m.Status.NativeFreshAttempt = m.Status.Attempts
+	}
+}
+
+// recordNativeWorkerStarted persists a start the operator sees on the recorded worker, on every path
+// and before anything can admit the next attempt (dj); once recorded, it reads no pod again.
+func (r *MigrationReconciler) recordNativeWorkerStarted(ctx context.Context, m, base *v1beta1.Migration, s nativeWorkerState) (bool, ctrl.Result, error) {
+	if !nativeWorkerStartUnseen(m) || s.worker == nil || s.w == workerForeign {
+		return false, ctrl.Result{}, nil
+	}
+	started, err := r.nativeWorkerStartSeen(ctx, s.worker)
+	if err != nil {
+		return true, ctrl.Result{}, errNativeReconcile
+	}
+	if !started {
+		return false, ctrl.Result{}, nil
+	}
+	desired := m.DeepCopy()
+	markNativeWorkerStarted(desired)
+	return r.patchNativeWorkerState(ctx, m, base, desired)
+}
+
 // countNativeAttempt marks the recorded attempt failed and counted; the retry gate decides the next one.
 func (r *MigrationReconciler) countNativeAttempt(m *v1beta1.Migration, failure string) {
 	m.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: m.Status.Attempts, FailedAt: metav1.NewTime(r.currentTime()), Failure: failure, Exemption: v1beta1.RetryGateCounted}

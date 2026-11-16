@@ -75,7 +75,7 @@ func nativeIdentityEnv(work native.WorkIdentity) []corev1.EnvVar {
 }
 
 // nativeFreshAttempt is the attempt that starts its state over with --restart: 1, or a later attempt
-// recorded when suspend dropped a worker whose engine never ran, since --resume refuses missing state.
+// while no worker container of the Migration has been seen to start, since --resume refuses missing state (E1).
 func nativeFreshAttempt(m *v1beta1.Migration) int32 {
 	if m.Status.NativeFreshAttempt > 1 {
 		return m.Status.NativeFreshAttempt

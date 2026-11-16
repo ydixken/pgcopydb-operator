@@ -84,6 +84,7 @@ func TestNativeLostFirstReceiptAdopted(t *testing.T) {
 		t.Fatal("lost receipt admitted")
 	}
 	f.patch = nil
+	f.r.APIReader = workerAttemptPodReader{workerAttemptReader{f}}
 	worker := &batchv1.Job{}
 	if err := f.store.Get(ctx, client.ObjectKey{Namespace: f.m.Namespace, Name: jobName(f.m, 1)}, worker); err != nil {
 		t.Fatalf("worker was not created: %v", err)
@@ -97,6 +98,23 @@ func TestNativeLostFirstReceiptAdopted(t *testing.T) {
 	if got.Status.Attempts != 1 || got.Status.NativeJobUID != string(worker.UID) || got.Status.NativeWorkerIntent != "" || f.creates != 1 {
 		t.Fatalf("worker was not adopted exactly once: attempts=%d uid=%s intent=%q creates=%d", got.Status.Attempts, got.Status.NativeJobUID, got.Status.NativeWorkerIntent, f.creates)
 	}
+}
+
+// workerAttemptPodReader serves pod lists for passes after a worker exists, where the worker table looks
+// for a started container (dj); every other read keeps the attempt fixture's guards.
+type workerAttemptPodReader struct{ workerAttemptReader }
+
+func (r workerAttemptPodReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	pods, ok := list.(*corev1.PodList)
+	if !ok {
+		r.f.t.Fatal("native attempt listed a resource other than pods")
+		return errBoom
+	}
+	if err := r.f.store.List(ctx, pods, opts...); err != nil {
+		return err
+	}
+	pods.ResourceVersion = "worker-attempt-snapshot"
+	return nil
 }
 
 // Lifecycle 3 (TestReviewLostRetryReceiptDeletionCleansBesideUnrecordedWorker): deletion resolves

@@ -335,7 +335,7 @@ _Appears in:_
 | `nativeWorkerIntent` _string_ | nativeWorkerIntent names the native worker the operator is about to create as attempt/nonce/digest:<br />the attempt, a 16-byte hex nonce and the SHA-256 of the expected Job. Its receipt or its abandonment clears it. |  | MaxLength: 108 <br />Optional: \{\} <br /> |
 | `nativeJobSHA256` _string_ | nativeJobSHA256 is the admission digest of the recorded native worker Job, written with its receipt. |  | MaxLength: 64 <br />Optional: \{\} <br /> |
 | `nativeReportJobUID` _string_ | nativeReportJobUID is the native worker Job whose completed-clone report was read and validated. |  | MaxLength: 36 <br />Optional: \{\} <br /> |
-| `nativeFreshAttempt` _integer_ | nativeFreshAttempt is the native attempt that starts its state over (--restart); absent means attempt 1. |  | Minimum: 2 <br />Optional: \{\} <br /> |
+| `nativeFreshAttempt` _integer_ | nativeFreshAttempt is the native attempt that starts its state over (--restart); absent means attempt 1.<br />While it is above attempts, no worker container has been seen to start, so the next attempt starts over;<br />a seen start sets it to the current attempt, and every later attempt resumes. |  | Minimum: 2 <br />Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 

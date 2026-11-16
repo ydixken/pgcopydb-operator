@@ -81,7 +81,11 @@ func (r *MigrationReconciler) applyNativeAttemptReceipt(desired *v1beta1.Migrati
 		now := metav1.Now()
 		desired.Status.StartedAt = &now
 	}
+	fresh := nativeWorkerStartUnseen(desired)
 	desired.Status.Attempts++
+	if fresh {
+		desired.Status.NativeFreshAttempt = desired.Status.Attempts + 1
+	}
 	desired.Status.JobName = job.Name
 	desired.Status.NativeJobUID, desired.Status.NativePVCUID = string(job.UID), string(pvc.UID)
 	desired.Status.NativeJobSHA256, desired.Status.NativeWorkerIntent = digest, ""

@@ -980,6 +980,8 @@ type MigrationStatus struct {
 	NativeReportJobUID string `json:"nativeReportJobUID,omitempty"`
 
 	// nativeFreshAttempt is the native attempt that starts its state over (--restart); absent means attempt 1.
+	// While it is above attempts, no worker container has been seen to start, so the next attempt starts over;
+	// a seen start sets it to the current attempt, and every later attempt resumes.
 	// +kubebuilder:validation:Minimum=2
 	// +optional
 	NativeFreshAttempt int32 `json:"nativeFreshAttempt,omitempty"`

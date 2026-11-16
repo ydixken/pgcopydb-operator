@@ -90,7 +90,7 @@ Without `dropIfExists`, the refused resume ends the Migration as `SnapshotLost`.
 
 With `spec.engine: rpgmigrate`, the suspend keeps the worker Job and sends SIGTERM to its running container instead.
 A worker whose container has not ended within the pass, or never started, is deleted in the foreground.
-When the first worker never started, its engine created no state to resume, so the operator records the next attempt as one that starts over with `--restart`.
+A worker that never started left no engine state, so the next attempt starts over with `--restart`, as [Retries and resume](#retries-and-resume) describes.
 A running compare Job is deleted, and its pin, its `verificationProgress` item and `Verified` are cleared, so the resumed finish creates a new one.
 A compare Job that already ended and kept its pod stays pinned.
 
@@ -113,6 +113,13 @@ The operator owns the retry policy, so the Migration holds the attempt counts an
 
 - Attempt 1 runs with `--restart`, which deletes any state on the work volume.
   A new Migration has no earlier state of its own, so any such state is foreign.
+- With `spec.engine: rpgmigrate`, a later attempt also runs with `--restart` until the operator sees a worker container of the Migration start.
+  This holds whatever ended the earlier attempts.
+  Examples are a suspend, a failure before the container started, and a worker Job that the operator deleted before its container started.
+  The engine refuses `--resume` on a state that it never created.
+  The operator sees a start in the pod status, or in the ready and succeeded counts of the Job.
+  It records the first start that it sees in `status.nativeFreshAttempt` before it creates the next attempt, and every attempt after that resumes.
+  A container that started but wrote no engine state therefore makes the next attempt fail for good, because its `--resume` finds no state.
 - Retries run with `--resume --not-consistent`.
   The retry skips the tables and indexes that the pgcopydb catalogs record as done.
   It restarts interrupted copies.

@@ -434,11 +434,17 @@ func TestNativeDeletionDropsNeverStartedWorker(t *testing.T) {
 	}
 }
 
-// Lifecycle 7: suspend drops a first attempt that never started and records attempt 2 as fresh,
+// Lifecycle 7: suspend drops a first attempt that never started and keeps attempt 2 fresh,
 // because --resume refuses a state the engine never created (E1).
 func TestNativeSuspendUnstartedFirstAttemptResumesFresh(t *testing.T) {
 	f := newNativeDispositionFixture(t, true)
 	w := t4Wrap(t, f)
+	// As the receipt of a fresh attempt 1 records it while no container has been seen to start (dj).
+	m := f.current()
+	m.Status.NativeFreshAttempt = 2
+	if err := f.store.Status().Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
 	t4RunningWorker(t, f, false)
 	t4Suspend(t, f)
 	for range 3 {
@@ -446,7 +452,7 @@ func TestNativeSuspendUnstartedFirstAttemptResumesFresh(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m := f.current()
+	m = f.current()
 	if m.Status.Phase != v1beta1.PhaseSuspended || m.Status.NativeFreshAttempt != 2 || !slices.Contains(w.order, "delete "+f.worker.Name) {
 		t.Fatalf("unstarted suspend: phase=%s fresh=%d writes=%v", m.Status.Phase, m.Status.NativeFreshAttempt, w.order)
 	}

@@ -216,23 +216,10 @@ func (r *MigrationReconciler) reconcileNativeRetainedDisposition(ctx context.Con
 	return r.finishNativeDeletion(ctx, live)
 }
 
-// stopNativeDispositionWorker is the stop of lifecycle 7. A worker whose container never started is
-// dropped, and suspend first records that its attempt was never fresh-started (E1); a bound running
-// container gets TERM, and a drop when it has not ended within the pass. The next pass re-reads W.
+// stopNativeDispositionWorker is the stop of lifecycle 7: a bound running container gets TERM, and a
+// drop when it has not ended within the pass; a worker whose container never started is dropped. The
+// worker table has already recorded a start it saw (dj), so the next attempt's --restart stays right.
 func (r *MigrationReconciler) stopNativeDispositionWorker(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, admitted bool) (bool, ctrl.Result, error) {
-	unstarted, err := r.nativeWorkerUnstarted(ctx, worker)
-	if err != nil {
-		return true, ctrl.Result{}, errNativeDisposition
-	}
-	if unstarted && m.Spec.Suspend && m.DeletionTimestamp.IsZero() && m.Status.Attempts == nativeFreshAttempt(m) {
-		desired := m.DeepCopy()
-		desired.Status.NativeFreshAttempt = m.Status.Attempts + 1
-		if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return true, ctrl.Result{}, nativeWorkerError(err)
-		}
-		desired.DeepCopyInto(m)
-		base = m.DeepCopy()
-	}
 	if !admitted {
 		return r.dropNativeDispositionJob(ctx, m, base, worker)
 	}
@@ -292,31 +279,6 @@ func (r *MigrationReconciler) dropNativeDispositionJob(ctx context.Context, m, b
 			"Job %s was deleted and it or its pods are still terminating; the operator waits until they are gone", job.Name))
 	}
 	return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
-}
-
-// nativeWorkerUnstarted reports a worker Job that has not ended and whose engine never ran: no pod
-// that carries its UID has a container that started, and the Job counts no ready or finished pod.
-func (r *MigrationReconciler) nativeWorkerUnstarted(ctx context.Context, job *batchv1.Job) (bool, error) {
-	if nativeWorkerMissing(job) || nativeWorkerEnded(job) || job.Status.Succeeded != 0 || job.Status.Failed != 0 || job.Status.Ready != nil && *job.Status.Ready != 0 {
-		return false, nil
-	}
-	pods, err := r.nativePreflightPods(ctx, job.Namespace)
-	if err != nil {
-		return false, err
-	}
-	for i := range pods {
-		p := &pods[i]
-		if !slices.ContainsFunc(p.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == job.UID }) &&
-			p.Labels[batchv1.ControllerUidLabel] != string(job.UID) && p.Labels[nativeWorkerLegacyControllerLabel] != string(job.UID) {
-			continue
-		}
-		for _, c := range append(slices.Clone(p.Status.InitContainerStatuses), p.Status.ContainerStatuses...) {
-			if c.ContainerID != "" || c.State.Running != nil || c.State.Terminated != nil || c.RestartCount != 0 {
-				return false, nil
-			}
-		}
-	}
-	return true, nil
 }
 
 // nativeCompareHeld is a C-table cell that waits or holds: a compare Job that is not this

@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -239,5 +240,258 @@ func TestNativeWorkVolumeLostWaitsForWorkerPod(t *testing.T) {
 	}
 	if _, err := f.dispatch(t); err != nil || !t5WorkVolumeLost(t, f.current()) || t5Blocked(f.current()) != nil {
 		t.Fatalf("no WorkVolumeLost once the pod ended: err=%v phase=%s blocked=%+v", err, f.current().Status.Phase, t5Blocked(f.current()))
+	}
+}
+
+// t5ReceiptAttemptOne records the fixture's attempt 1 through the receipt code, as its Create would,
+// so the fresh mark is whatever the receipt writes and not a hand-written status.
+func t5ReceiptAttemptOne(t *testing.T, f *nativeDispositionFixture) {
+	t.Helper()
+	m := f.current()
+	digest := m.Status.NativeJobSHA256
+	m.Status.Attempts, m.Status.JobName, m.Status.NativeJobUID, m.Status.NativePVCUID, m.Status.NativeJobSHA256 = 0, "", "", "", ""
+	m.Status.NativeFreshAttempt = 0
+	if !f.r.applyNativeAttemptReceipt(m, f.worker, f.pvc, digest) {
+		t.Fatal("attempt 1 receipt refused")
+	}
+	if err := f.store.Status().Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	f.m = f.current()
+}
+
+// The engine modes a native worker runs in.
+const (
+	t5Restart = "--restart"
+	t5Resume  = "--resume"
+)
+
+// t5WorkerMode returns the engine mode of the worker Job of attempt n: --restart or --resume.
+func t5WorkerMode(t *testing.T, f *nativeDispositionFixture, n int32) string {
+	t.Helper()
+	job := &batchv1.Job{}
+	if err := f.store.Get(context.Background(), client.ObjectKey{Namespace: f.m.Namespace, Name: jobName(f.m, n)}, job); err != nil {
+		t.Fatalf("attempt %d worker: %v", n, err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	words := append(slices.Clone(c.Command), c.Args...)
+	restart, resume := slices.Contains(words, t5Restart), slices.Contains(words, t5Resume)
+	switch {
+	case restart && !resume:
+		return t5Restart
+	case resume && !restart:
+		return t5Resume
+	}
+	t.Fatalf("attempt %d worker has no single engine mode: %q", n, words)
+	return ""
+}
+
+// t5RunToAttempt dispatches until attempt n exists, recording the stored fresh mark at its worker's Create.
+func t5RunToAttempt(t *testing.T, f *nativeDispositionFixture, w *t4Writes, n int32) int32 {
+	t.Helper()
+	atCreate := int32(-1)
+	w.create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if obj.GetName() == jobName(f.m, n) && len(opts) == 0 {
+			atCreate = f.current().Status.NativeFreshAttempt
+		}
+		return c.Create(ctx, obj, opts...)
+	}
+	for pass := 0; pass < 8 && f.current().Status.Attempts < n; pass++ {
+		if _, err := f.dispatch(t); err != nil {
+			t.Fatalf("pass %d towards attempt %d: %v", pass, n, err)
+		}
+	}
+	if got := f.current().Status.Attempts; got != n || atCreate < 0 {
+		t.Fatalf("attempt %d was not created: attempts=%d", n, got)
+	}
+	return atCreate
+}
+
+// t5FailWorkerBeforeStart ends the worker of the current attempt Failed with a pod that never ran a container, then removes that pod.
+func t5FailWorkerBeforeStart(t *testing.T, f *nativeDispositionFixture) {
+	t.Helper()
+	job := &batchv1.Job{}
+	if err := f.store.Get(context.Background(), client.ObjectKey{Namespace: f.m.Namespace, Name: f.current().Status.JobName}, job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()}}}
+	if err := f.store.Status().Update(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	pods := &corev1.PodList{}
+	if err := f.store.List(context.Background(), pods); err != nil {
+		t.Fatal(err)
+	}
+	for i := range pods.Items {
+		if o := metav1.GetControllerOf(&pods.Items[i]); o != nil && o.UID == job.UID {
+			if err := f.store.Delete(context.Background(), &pods.Items[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// dj: an attempt starts over with --restart exactly while no worker container of the Migration has been
+// seen to start, whatever ended the attempts before it; once one is seen, every later attempt resumes.
+// The mark is in the stored status before the next worker's Create.
+func TestNativeFreshAttemptUntilAWorkerStarted(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		end        func(*testing.T, *nativeDispositionFixture)
+		mode       string
+		markAtNext int32 // the stored nativeFreshAttempt when attempt 2's worker is created
+	}{
+		{"failure before start, pod gone", func(t *testing.T, f *nativeDispositionFixture) {
+			if err := f.store.Delete(context.Background(), f.pod); err != nil {
+				t.Fatal(err)
+			}
+		}, t5Restart, 2},
+		{"R7 drop of a counted attempt that never started", func(t *testing.T, f *nativeDispositionFixture) {
+			t4RunningWorker(t, f, false)
+			m := f.current()
+			m.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: 1, FailedAt: metav1.Now(), Failure: "counted before start", Exemption: v1beta1.RetryGateCounted}
+			if err := f.store.Status().Update(context.Background(), m); err != nil {
+				t.Fatal(err)
+			}
+		}, t5Restart, 2},
+		{"suspend of a worker that never started", func(t *testing.T, f *nativeDispositionFixture) {
+			t4RunningWorker(t, f, false)
+			t4Suspend(t, f)
+			for pass := 0; pass < 4 && f.current().Status.Phase != v1beta1.PhaseSuspended; pass++ {
+				if _, err := f.dispatch(t); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m := f.current()
+			m.Spec.Suspend = false
+			m.Generation++
+			if err := f.store.Update(context.Background(), m); err != nil {
+				t.Fatal(err)
+			}
+		}, t5Restart, 2},
+		{"started, then failed", func(*testing.T, *nativeDispositionFixture) {}, t5Resume, 0},
+		{"seen running, then failed and its pod vanished", func(t *testing.T, f *nativeDispositionFixture) {
+			failed := f.worker.Status
+			t4RunningWorker(t, f, true)
+			if _, err := f.dispatch(t); err != nil {
+				t.Fatal(err)
+			}
+			f.worker.Status = failed
+			f.replace(f.worker)
+			if err := f.store.Delete(context.Background(), f.pod); err != nil {
+				t.Fatal(err)
+			}
+		}, t5Resume, 0},
+		{"started, Job gone, its pod found by label only", func(t *testing.T, f *nativeDispositionFixture) {
+			orphan := f.pod.DeepCopy()
+			// Another controller, so only the controller-uid label ties the pod to the worker (the fixture's GC needs a controller).
+			orphan.OwnerReferences[0].UID, orphan.OwnerReferences[0].Name = "unrelated-owner", "unrelated"
+			orphan.Labels[batchv1.ControllerUidLabel] = string(f.worker.UID)
+			f.replace(orphan)
+			if err := f.store.Delete(context.Background(), f.worker); err != nil {
+				t.Fatal(err)
+			}
+		}, t5Resume, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeDispositionFixture(t, true)
+			w := t4Wrap(t, f)
+			t5ReceiptAttemptOne(t, f)
+			tc.end(t, f)
+			if mark := t5RunToAttempt(t, f, w, 2); mark != tc.markAtNext {
+				t.Fatalf("stored nativeFreshAttempt at attempt 2's Create = %d, want %d", mark, tc.markAtNext)
+			}
+			if mode := t5WorkerMode(t, f, 2); mode != tc.mode {
+				t.Fatalf("attempt 2 runs %s, want %s", mode, tc.mode)
+			}
+		})
+	}
+}
+
+// dj across attempts: a fresh attempt 2 that never started keeps attempt 3 fresh; once attempt 3's
+// container is seen, attempt 4 resumes, and so does every attempt after it.
+func TestNativeFreshAttemptChain(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	f.m.Spec.BackoffLimit = 5
+	w := t4Wrap(t, f)
+	m := f.current()
+	m.Spec.BackoffLimit = 5
+	if err := f.store.Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	t5ReceiptAttemptOne(t, f)
+	if err := f.store.Delete(context.Background(), f.pod); err != nil {
+		t.Fatal(err)
+	}
+	t5RunToAttempt(t, f, w, 2)
+	if got := f.current().Status.NativeFreshAttempt; got != 3 || t5WorkerMode(t, f, 2) != t5Restart {
+		t.Fatalf("after a fresh attempt 2: nativeFreshAttempt=%d mode=%s", got, t5WorkerMode(t, f, 2))
+	}
+	t5FailWorkerBeforeStart(t, f)
+	t5RunToAttempt(t, f, w, 3)
+	if got := f.current().Status.NativeFreshAttempt; got != 4 || t5WorkerMode(t, f, 3) != t5Restart {
+		t.Fatalf("after a fresh attempt 3: nativeFreshAttempt=%d mode=%s", got, t5WorkerMode(t, f, 3))
+	}
+	// Attempt 3's container starts and the attempt fails with its pod kept.
+	job := &batchv1.Job{}
+	if err := f.store.Get(context.Background(), client.ObjectKey{Namespace: f.m.Namespace, Name: jobName(f.m, 3)}, job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()}}}
+	if err := f.store.Status().Update(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	pod := nativeRecoveryTestPod(job, 1)
+	pod.UID = "attempt-3-pod"
+	if err := f.store.Create(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if mark := t5RunToAttempt(t, f, w, 4); mark != 3 || t5WorkerMode(t, f, 4) != t5Resume || f.current().Status.NativeFreshAttempt != 3 {
+		t.Fatalf("after attempt 3 started: mark at create=%d mode=%s nativeFreshAttempt=%d", mark, t5WorkerMode(t, f, 4), f.current().Status.NativeFreshAttempt)
+	}
+	t5FailWorkerBeforeStart(t, f)
+	if t5RunToAttempt(t, f, w, 5); t5WorkerMode(t, f, 5) != t5Resume {
+		t.Fatalf("attempt 5 after a seen start runs %s", t5WorkerMode(t, f, 5))
+	}
+}
+
+// dj status integrity: a fresh attempt past the next attempt is a status no pass wrote, so the pass refuses it.
+func TestNativeFreshAttemptPastNextRefused(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	m := f.current()
+	m.Status.NativeFreshAttempt = 3
+	if err := f.store.Status().Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.dispatch(t); !errors.Is(err, errNativeReconcile) || f.workerCreates != 0 {
+		t.Fatalf("nativeFreshAttempt=3 at attempt 1: err=%v creates=%d", err, f.workerCreates)
+	}
+}
+
+type t5FailingPodList struct{ client.Reader }
+
+func (t5FailingPodList) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errBoom
+}
+
+// dj: a pod list that fails is no evidence that no container started, so the start search ends the pass
+// with an error and writes nothing, instead of letting the pass go on as if none had started.
+func TestNativeWorkerStartSearchError(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	t5ReceiptAttemptOne(t, f)
+	f.r.APIReader = t5FailingPodList{f.r.APIReader}
+	m := f.current()
+	handled, _, err := f.r.recordNativeWorkerStarted(context.Background(), m, m.DeepCopy(), nativeWorkerState{w: workerAdmitted, worker: f.worker})
+	if !handled || err == nil || f.patches != 0 || f.current().Status.NativeFreshAttempt != 2 {
+		t.Fatalf("failed pod list: handled=%v err=%v patches=%d fresh=%d", handled, err, f.patches, f.current().Status.NativeFreshAttempt)
+	}
+}
+
+// dj, reported and not fixed: after a seen start every attempt resumes, so a container that started but
+// left no engine state makes the next attempt refuse with state-missing (engine E1), a terminal BadState.
+func TestNativeStartedWithoutStateIsTerminal(t *testing.T) {
+	reason, terminal := nativeWorkerTerminalFailure(nativeFailureTestRecord("ERROR", "native:BadState: state-missing: native state does not exist"))
+	if reason != nativeFailureBadState || !terminal {
+		t.Fatalf("state-missing classified as %q terminal=%v", reason, terminal)
 	}
 }

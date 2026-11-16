@@ -202,7 +202,7 @@ func (r *MigrationReconciler) nativeReconcileResources(ctx context.Context, m *v
 	defer cancel()
 	var s nativeWorkerState
 	n := m.Status.Attempts
-	if n < 0 || n == int32(1<<31-1) || n > 0 && (m.Status.JobName != jobName(m, n) || !native.NativeReceiptsMatch(m, types.UID(m.Status.NativeJobUID), types.UID(m.Status.NativePVCUID)) || m.Status.NativeJobSHA256 == "") ||
+	if n < 0 || n == int32(1<<31-1) || nativeFreshAttempt(m) > n+1 || n > 0 && (m.Status.JobName != jobName(m, n) || !native.NativeReceiptsMatch(m, types.UID(m.Status.NativeJobUID), types.UID(m.Status.NativePVCUID)) || m.Status.NativeJobSHA256 == "") ||
 		n == 0 && (m.Status.JobName != "" || m.Status.NativeJobUID != "" || m.Status.NativePVCUID != "" || m.Status.NativeJobSHA256 != "") {
 		return s, errNativeReconcile
 	}
@@ -396,6 +396,9 @@ func (r *MigrationReconciler) reconcileNativeRunning(ctx context.Context, m, bas
 // retry and running columns of the W table; the suspend and deletion columns stay with disposition.
 func (r *MigrationReconciler) reconcileNativeWorkerState(ctx context.Context, m, base *v1beta1.Migration, s nativeWorkerState) (bool, ctrl.Result, error) {
 	if handled, result, err := r.reconcileNativeNext(ctx, m, base, s); handled {
+		return handled, result, err
+	}
+	if handled, result, err := r.recordNativeWorkerStarted(ctx, m, base, s); handled {
 		return handled, result, err
 	}
 	switch s.w {
