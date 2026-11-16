@@ -384,3 +384,59 @@ func TestNativeForeignWorkClaimHoldsFirstAttempt(t *testing.T) {
 		t.Fatalf("foreign work claim did not hold the first attempt: %+v creates=%d", blocked, f.creates)
 	}
 }
+
+// Design A's flip of TestNativeRecoveryRoutes/missing_pod, as pairs: the engine-free check admits a
+// finished Job without a pod, refuses an active or terminating one, and the log readers still need the pod.
+func TestNativeEngineFreePodlessPairs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status func(*batchv1.JobStatus)
+		admit  bool
+	}{
+		{"finished job", func(*batchv1.JobStatus) {}, true},
+		{"active job", func(s *batchv1.JobStatus) { *s = batchv1.JobStatus{Active: 1, Ready: ptr.To(int32(0))} }, false},
+		{"terminating job", func(s *batchv1.JobStatus) { s.Terminating = ptr.To(int32(1)) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeRecoveryFixture(t, 2)
+			ctx := context.Background()
+			if err := f.store.Delete(ctx, f.pod); err != nil {
+				t.Fatal(err)
+			}
+			worker := f.worker.DeepCopy()
+			tc.status(&worker.Status)
+			f.replace(worker)
+			if err := f.store.Get(ctx, client.ObjectKeyFromObject(worker), worker); err != nil {
+				t.Fatal(err)
+			}
+			pod, err := f.r.nativeEngineFreeWorker(ctx, f.m, worker, f.pvc)
+			if admitted := err == nil && nativePodless(pod); admitted != tc.admit || !tc.admit && !errors.Is(err, errNativeRecoveryActive) {
+				t.Fatalf("engine-free admitted=%v err=%v, want %v", admitted, err, tc.admit)
+			}
+			if pod, err := f.r.nativeQuiescentWorker(ctx, f.m, worker, f.pvc); err == nil || pod != nil {
+				t.Fatal("a log reader admitted a worker without its pod")
+			}
+		})
+	}
+}
+
+// q4: the receipt records only the Job the recorded intent names; a changed intent refuses it.
+func TestNativeReceiptRequiresRecordedIntent(t *testing.T) {
+	f := newWorkerAttemptFixture(t)
+	f.beforeRead = func(obj client.Object, n int) {
+		if _, ok := obj.(*v1beta1.Migration); ok && n == 3 {
+			m := f.storedMigration()
+			_, _, digest, _ := nativeIntentParts(m.Status.NativeWorkerIntent)
+			m.Status.NativeWorkerIntent = "1/" + strings.Repeat("e", 32) + "/" + digest
+			if err := f.store.Status().Update(context.Background(), m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy()); err == nil {
+		t.Fatal("a receipt was recorded under a changed intent")
+	}
+	if got := f.storedMigration(); got.Status.Attempts != 0 || got.Status.NativeJobUID != "" || f.creates != 1 {
+		t.Fatalf("changed intent: attempts=%d uid=%q creates=%d", got.Status.Attempts, got.Status.NativeJobUID, f.creates)
+	}
+}
