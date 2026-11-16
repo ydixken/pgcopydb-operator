@@ -194,8 +194,9 @@ func buildNativeWorkerJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClai
 	// Final native proof and cleanup still need the original Job and Pod after exit.
 	job.Spec.TTLSecondsAfterFinished = nil
 	pod := &job.Spec.Template.Spec
-	automount := false
+	automount, links := false, false
 	pod.AutomountServiceAccountToken = &automount
+	pod.EnableServiceLinks = &links
 	pod.DNSPolicy = corev1.DNSClusterFirst
 	pod.SecurityContext.FSGroupChangePolicy = nativeFSGroupChangePolicy()
 	container := &pod.Containers[0]
@@ -1612,7 +1613,9 @@ func buildNativeVersionJob(m *v1beta1.Migration, runnerImage, name string) (*bat
 				ObjectMeta: metav1.ObjectMeta{Labels: labels(m)},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: &deny,
-					DNSPolicy: corev1.DNSClusterFirst,
+					// Linked namespace Services can add an LD_ name or push the env past 64 KiB, which the native programs refuse.
+					EnableServiceLinks: &deny,
+					DNSPolicy:          corev1.DNSClusterFirst,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, FSGroupChangePolicy: nativeFSGroupChangePolicy(),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
@@ -1685,11 +1688,12 @@ func buildNativeEvidenceJob(m *v1beta1.Migration, runnerImage string, want nativ
 		delete(job.Labels, labelMigration)
 		delete(job.Spec.Template.Labels, labelMigration)
 	}
-	deadline, automount := int64(90), false
+	deadline, automount, links := int64(90), false, false
 	job.Spec.ActiveDeadlineSeconds = &deadline
 	job.Spec.TTLSecondsAfterFinished = nil
 	pod := &job.Spec.Template.Spec
 	pod.AutomountServiceAccountToken = &automount
+	pod.EnableServiceLinks = &links
 	pod.DNSPolicy = corev1.DNSClusterFirst
 	pod.SecurityContext.FSGroupChangePolicy = nativeFSGroupChangePolicy()
 	pod.Volumes = volumes

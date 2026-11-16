@@ -405,7 +405,7 @@ func admittedPodSpec(spec *corev1.PodSpec, image string) bool {
 }
 
 func admittedPodIsolation(spec *corev1.PodSpec) bool {
-	return len(spec.Containers) == 1 && len(spec.InitContainers) == 0 && len(spec.EphemeralContainers) == 0 && spec.RestartPolicy == corev1.RestartPolicyNever && !spec.HostNetwork && !spec.HostPID && !spec.HostIPC && spec.RuntimeClassName == nil && (spec.HostUsers == nil || *spec.HostUsers) && (spec.ShareProcessNamespace == nil || !*spec.ShareProcessNamespace) && len(spec.HostAliases) == 0 && spec.DNSConfig == nil && (spec.DNSPolicy == "" || spec.DNSPolicy == corev1.DNSClusterFirst) && spec.AutomountServiceAccountToken != nil && !*spec.AutomountServiceAccountToken && (spec.ServiceAccountName == "" || spec.ServiceAccountName == nativeDefaultServiceAccount) && (spec.DeprecatedServiceAccount == "" || spec.DeprecatedServiceAccount == nativeDefaultServiceAccount)
+	return len(spec.Containers) == 1 && len(spec.InitContainers) == 0 && len(spec.EphemeralContainers) == 0 && spec.RestartPolicy == corev1.RestartPolicyNever && !spec.HostNetwork && !spec.HostPID && !spec.HostIPC && spec.RuntimeClassName == nil && (spec.HostUsers == nil || *spec.HostUsers) && (spec.ShareProcessNamespace == nil || !*spec.ShareProcessNamespace) && len(spec.HostAliases) == 0 && spec.DNSConfig == nil && (spec.DNSPolicy == "" || spec.DNSPolicy == corev1.DNSClusterFirst) && spec.AutomountServiceAccountToken != nil && !*spec.AutomountServiceAccountToken && spec.EnableServiceLinks != nil && !*spec.EnableServiceLinks && (spec.ServiceAccountName == "" || spec.ServiceAccountName == nativeDefaultServiceAccount) && (spec.DeprecatedServiceAccount == "" || spec.DeprecatedServiceAccount == nativeDefaultServiceAccount)
 }
 
 func samePodExecution(a, b *corev1.PodSpec) bool {

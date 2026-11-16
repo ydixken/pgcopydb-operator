@@ -129,7 +129,8 @@
           "seccompProfile": {
             "type": "RuntimeDefault"
           }
-        }
+        },
+        "enableServiceLinks": false
       }
     }
   },

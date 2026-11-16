@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -1318,7 +1319,7 @@ func nativeRuntimeServiceEnvironment(service *corev1.Service, values map[string]
 		return errors.New("active profile Service input refused")
 	}
 	port := service.Spec.Ports[0]
-	if port.Protocol != corev1.ProtocolTCP || service.Namespace == nativePreflightDefaultSA && (service.Name != "kubernetes" || port.Name != nativeRuntimeHTTPS || port.Port != 443) || service.Namespace != nativePreflightDefaultSA && (service.Name != nativeRuntimePG16 && service.Name != nativeRuntimePG18 || port.Name != "" || port.Port != 5432 || port.TargetPort.IntVal != 5432) {
+	if port.Protocol != corev1.ProtocolTCP || service.Namespace == nativePreflightDefaultSA && (service.Name != nativeKubernetesService || port.Name != nativeRuntimeHTTPS || port.Port != 443) || service.Namespace != nativePreflightDefaultSA && (service.Name != nativeRuntimePG16 && service.Name != nativeRuntimePG18 || port.Name != "" || port.Port != 5432 || port.TargetPort.IntVal != 5432) {
 		return errors.New("active profile Service port refused")
 	}
 	prefix := strings.ToUpper(strings.ReplaceAll(service.Name, "-", "_"))
@@ -1449,6 +1450,10 @@ func nativeRuntimeExpected(ctx context.Context, clientset kubernetes.Interface, 
 	for _, service := range value.services {
 		if service.Namespace != nativePreflightDefaultSA && service.Namespace != pod.Namespace {
 			return value, errors.New("foreign Service environment refused")
+		}
+		// Kubelet links the pod namespace's Services only while enableServiceLinks is unset or true.
+		if service.Namespace == pod.Namespace && pod.Spec.EnableServiceLinks != nil && !*pod.Spec.EnableServiceLinks {
+			continue
 		}
 		if err := nativeRuntimeServiceEnvironment(service, value.Environment); err != nil {
 			return value, err
@@ -2349,7 +2354,7 @@ func TestNativeRuntimeActiveExpectedUsesIndependentServiceAndPodInputs(t *testin
 		t.Fatal(err)
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "owned-helper", Namespace: input.Namespace, UID: "owned-pod"}, Spec: *job.Spec.Template.Spec.DeepCopy()}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: nativePreflightDefaultSA, UID: "original-service"}, Spec: corev1.ServiceSpec{ClusterIP: "10.97.42.1", Type: corev1.ServiceTypeClusterIP, Ports: []corev1.ServicePort{{Name: nativeRuntimeHTTPS, Port: 443, Protocol: corev1.ProtocolTCP}}}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: nativeKubernetesService, Namespace: nativePreflightDefaultSA, UID: "original-service"}, Spec: corev1.ServiceSpec{ClusterIP: "10.97.42.1", Type: corev1.ServiceTypeClusterIP, Ports: []corev1.ServicePort{{Name: nativeRuntimeHTTPS, Port: 443, Protocol: corev1.ProtocolTCP}}}}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nativePasswordOwnedNode}, Status: corev1.NodeStatus{Capacity: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("12Gi")}}}
 	clientset := kubefake.NewClientset(service, node)
 	expected, err := nativeRuntimeExpected(context.Background(), clientset, pod, nativeRuntimePhase, nil)
@@ -2359,6 +2364,15 @@ func TestNativeRuntimeActiveExpectedUsesIndependentServiceAndPodInputs(t *testin
 	if expected.ProcessEnvironment["HOME"] != "/" {
 		t.Fatal("runc HOME for a UID without a passwd entry is not expected")
 	}
+	linked := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: nativeRuntimePG16, Namespace: input.Namespace, UID: "owned-service"}, Spec: corev1.ServiceSpec{ClusterIP: "10.97.42.16", Type: corev1.ServiceTypeClusterIP, Ports: []corev1.ServicePort{{Port: 5432, TargetPort: intstr.FromInt32(5432), Protocol: corev1.ProtocolTCP}}}}
+	for links, want := range map[bool]string{false: "", true: "10.97.42.16"} {
+		pod.Spec.EnableServiceLinks = &links
+		expected, err := nativeRuntimeExpected(context.Background(), clientset, pod, nativeRuntimePhase, []*corev1.Service{linked})
+		if err != nil || expected.Environment["PG16_SERVICE_HOST"] != want || expected.Environment["KUBERNETES_SERVICE_HOST"] != service.Spec.ClusterIP {
+			t.Fatalf("namespace Service environment with service links %v: %v", links, err)
+		}
+	}
+	pod.Spec.EnableServiceLinks = job.Spec.Template.Spec.EnableServiceLinks
 	if len(expected.Command) != 10 || !slices.Equal(expected.RunningArgs, expected.Command[5:]) || expected.OOMScoreAdj != 980 {
 		t.Fatal("fixed command or pinned burstable OOM derivation changed")
 	}

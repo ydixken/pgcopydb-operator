@@ -254,6 +254,17 @@ The native image never defaults to `runner.image` or `--runner-image`.
 We preserve image values exactly, without trimming or normalization.
 Native worker Jobs set `LC_ALL=C` and `LANG=C`.
 
+Every native Job pod sets `enableServiceLinks: false`, and native admission refuses a native pod whose service links are unset or true.
+With service links on, kubelet adds about eight variables for every Service in the namespace.
+The native helpers refuse any `LD_` variable, which a Service named `ld-*` produces.
+The worker commands and the comparison helper also refuse an environment larger than 64 KiB, which about 220 single-port Services produce.
+We turn the links off rather than relax those checks.
+The native pods still receive the `kubernetes` Service variables, and they reach the databases by the hosts in the Migration.
+
+> [!warning]
+> A native pod created by an operator build that left service links unset no longer matches, so the controller refuses to act on it.
+> Let native Migrations finish before you upgrade from such a build.
+
 > [!important]
 > `spec.engine: rpgmigrate` runs only when the effective image pins one of the qualified engine `db50bc9` runner manifests.
 > These are `ghcr.io/ydixken/rpgmigrate@sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87` for arm64 and `ghcr.io/ydixken/rpgmigrate@sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412` for amd64.

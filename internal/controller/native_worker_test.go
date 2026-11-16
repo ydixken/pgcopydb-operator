@@ -450,7 +450,8 @@ func TestNativeWorkerExistingJobBinding(t *testing.T) {
 		"termination policy": func(j *batchv1.Job) {
 			j.Spec.Template.Spec.Containers[0].TerminationMessagePolicy = corev1.TerminationMessageFallbackToLogsOnError
 		},
-		workerDeletingCase: func(j *batchv1.Job) { now := metav1.Now(); j.DeletionTimestamp = &now; j.Finalizers = []string{"hold"} },
+		workerDeletingCase:    func(j *batchv1.Job) { now := metav1.Now(); j.DeletionTimestamp = &now; j.Finalizers = []string{"hold"} },
+		"service links unset": func(j *batchv1.Job) { j.Spec.Template.Spec.EnableServiceLinks = nil },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
