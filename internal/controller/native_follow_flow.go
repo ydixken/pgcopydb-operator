@@ -50,8 +50,8 @@ func (r *MigrationReconciler) nativeFollowTerminalCurrent(ctx context.Context, m
 	if err != nil || !native.NativeReceiptsMatch(live, current.UID, claim.UID) || current.Generation != worker.Generation || !nativeEvidenceWorkerComplete(current) {
 		return nil, nil, errNativeFollowCompletion
 	}
-	pod, err := r.nativeQuiescentWorker(ctx, live, current, claim)
-	if err != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation || !apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !podexec.SamePodState(original, pod, workerContainer)) {
+	pod, err := r.nativeEngineFreeWorker(ctx, live, current, claim)
+	if err != nil || !nativeSameWorkerPod(original, pod) {
 		return nil, nil, errNativeFollowCompletion
 	}
 	return live, pod, nil
@@ -171,15 +171,14 @@ func (r *MigrationReconciler) nativeEndposHelperTerminal(ctx context.Context, m 
 	return job, pod, err
 }
 
-// clone is DATA from a freshly admitted complete capture and ParseCloneOutput, not target authority.
+// clone is DATA from a freshly admitted complete capture and ParseCloneOutput, or nil after its receipt; never target authority.
 func (r *MigrationReconciler) readNativeFollowTargetCompletion(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, clone *native.Report) (*native.CompletedObservation, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	if r.NativeEvidence == nil || m == nil || worker == nil || pvc == nil {
 		return nil, errNativeFollowCompletion
 	}
-	work, err := nativeWorkIdentity(m, pvc)
-	if err != nil || native.ValidateCompletedClone(clone, work) != nil {
+	if !nativeCloneReportAdmitted(m, worker, pvc, clone) {
 		return nil, errNativeFollowCompletion
 	}
 	capture, err := r.captureNativeEndposAck(ctx, m, worker, pvc)

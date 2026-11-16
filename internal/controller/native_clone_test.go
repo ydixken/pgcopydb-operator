@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -74,12 +75,17 @@ func TestNativeCloneOnlyCompletion(t *testing.T) {
 
 func nativeCloneSuccess(t *testing.T) {
 	f := newNativeCloneFixture(t, false, nil)
+	f.dropReportReceipt()
+	if result, err := nativeCloneFinish(t, f); err != nil || result.RequeueAfter != time.Nanosecond || f.current().Status.NativeReportJobUID != string(f.worker.UID) || f.current().Status.Phase == v1beta1.PhaseCompleted {
+		t.Fatalf("report pass did not record only its receipt: result=%v err=%v", result, err)
+	}
+	f.m = f.current()
 	result, err := nativeCloneFinish(t, f)
 	got := f.current()
 	if err != nil || result != (ctrl.Result{}) || got.Status.Phase != v1beta1.PhaseCompleted || got.Status.CompletedAt == nil || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCloneCompleted) {
 		t.Fatalf("phase=%s result=%v err=%v", got.Status.Phase, result, err)
 	}
-	if got.Status.NativeJobUID != string(f.worker.UID) || got.Status.NativePVCUID != string(f.pvc.UID) || got.Status.JobName != f.worker.Name || got.Status.Attempts != 1 || got.Status.Replication != nil || f.logs != 1 || f.patches != 1 {
+	if got.Status.NativeJobUID != string(f.worker.UID) || got.Status.NativePVCUID != string(f.pvc.UID) || got.Status.JobName != f.worker.Name || got.Status.Attempts != 1 || got.Status.Replication != nil || f.logs != 1 || f.patches != 2 {
 		t.Fatal("plain clone changed execution receipts or consumed follow authority")
 	}
 }
@@ -99,7 +105,7 @@ func nativeCloneRequestedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := f.current()
-	if got.Status.Phase != v1beta1.PhaseCompleted || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionVerified) || len(got.Status.Verification) != 2 || f.logs != 3 || got.Status.NativeSchemaJobUID != "native-clone-schema-helper" || got.Status.NativeDataJobUID != "native-clone-data-helper" {
+	if got.Status.Phase != v1beta1.PhaseCompleted || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionVerified) || len(got.Status.Verification) != 2 || f.logs != 2 || got.Status.NativeSchemaJobUID != "native-clone-schema-helper" || got.Status.NativeDataJobUID != "native-clone-data-helper" {
 		t.Fatal("Complete did not retain the freshly checked profile")
 	}
 	expectNativeDataProgress(t, got, true, true)
@@ -113,7 +119,7 @@ func nativeCloneReceiptReturn(t *testing.T) {
 	}
 	result, err := nativeCloneFinish(t, f)
 	got := f.current()
-	if err != nil || result.RequeueAfter != pollInterval || f.patches != 1 || f.logs != 1 || got.Status.NativeSchemaJobUID != nativeKnownSchemaHelper || got.Status.Phase != v1beta1.PhaseVerifying || got.Status.CompletedAt != nil || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) {
+	if err != nil || result.RequeueAfter != pollInterval || f.patches != 1 || f.logs != 0 || got.Status.NativeSchemaJobUID != nativeKnownSchemaHelper || got.Status.Phase != v1beta1.PhaseVerifying || got.Status.CompletedAt != nil || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) {
 		t.Fatalf("receipt persistence fell through: result=%v err=%v", result, err)
 	}
 }
@@ -133,6 +139,7 @@ func nativeCloneHistoricalResult(t *testing.T) {
 
 func nativeCloneInvalidReport(t *testing.T) {
 	f := newNativeCloneFixture(t, false, nil)
+	f.dropReportReceipt()
 	f.report.Copy.Tables.Done = nil
 	f.encodeReport()
 	if _, err := nativeCloneFinish(t, f); err == nil || f.patches != 0 || meta.IsStatusConditionTrue(f.current().Status.Conditions, v1beta1.ConditionComplete) {

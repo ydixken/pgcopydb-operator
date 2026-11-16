@@ -45,8 +45,38 @@ Read the `Verified` condition and the compare Job logs before you act.
 > Quiesce the target before you trust a data compare.
 > A compare against a target that still receives the stream can mismatch while replication catches up.
 
-For follow migrations, the schema and data compares run last, after the operator verifies the drain and drops the slot.
+For follow migrations, the schema and data compares run last, after the operator verifies the drain.
+With the default engine, the operator drops the slot before the compares start.
+With `spec.engine: rpgmigrate`, the compares run before the native cleanup drops the slot, so the slot keeps WAL on the source while the compares run.
 A rehearsal is the one compare that runs earlier, and for that reason it reports no verdict.
+
+## Native completion
+
+With `spec.engine: rpgmigrate`, the operator reads the completed-clone report of the worker one time, and writes the UID of the worker Job to `status.nativeReportJobUID`.
+After that, the compares and the completion do not need the worker pod.
+If the worker pod goes before the operator reads the report, no pass can read it.
+Then the attempt counts as failed, and the retry gate decides on the next attempt.
+
+The operator writes the UID of each native compare Job to the status when it creates the Job.
+The operator reads output only from the Job with that UID.
+The pass that creates a compare Job verifies the drain first.
+While that Job runs, each pass reads only the compare Job and its pod, and starts no other helper Job.
+The pass after the last compare verifies the drain again before the cleanup starts.
+
+The operator deletes a compare Job, and a later pass creates a new one, in these cases:
+
+- The status has no UID for the Job, for example because the status write after the create failed.
+- The Job is different from the Job that the operator builds from the current spec.
+- The Job ended, but its pod is gone.
+
+The compare Job includes the generation of the Migration, so a spec change also starts a running compare again.
+When the Job with the recorded UID is gone, the operator clears the UID in the status, and a later pass creates a new Job.
+The operator never reads the output of a compare Job that it deletes.
+
+A Job with the compare name that the Migration does not control sets `Blocked=True` with reason `EvidenceUnavailable`.
+The operator does not read or delete that Job.
+Delete it to let the verification continue.
+A compare Job that Kubernetes is deleting sets the same condition until the Job and its pods are gone.
 
 ## Rehearsal
 
@@ -225,7 +255,7 @@ The operator reads these lines from the Job's log into `status.verificationProgr
 
 With `spec.engine: rpgmigrate`, only the `data` item exists.
 The native engine has no rehearsal, and its drain is proved without a compare, so it leaves no `drain` item.
-The native compare helper checks every progress line of `rpgmigrate compare data`, but its Job logs only its sealed result.
+The native compare helper verifies every progress line of `rpgmigrate compare data`, but its Job logs only its sealed result.
 The operator therefore reads no sample while the compare runs.
 After the helper succeeds, the operator records the final sample from that result: `final` is true, every planned table and byte is compared, and `inFlight` is empty.
 A compare that the operator refuses leaves no item.

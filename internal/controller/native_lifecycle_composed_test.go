@@ -284,6 +284,7 @@ func TestNativePlainCloneMissingReport(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newNativeCloneFixture(t, false, nil)
+			f.dropReportReceipt()
 			f.raw = raw
 			if _, err := nativeDispatch(t, f.r, f.m); err == nil || f.logs == 0 || f.patches != 0 {
 				t.Fatal("plain clone without a complete report did not fail closed", err)

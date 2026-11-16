@@ -85,8 +85,12 @@ func TestNativeReconcileCachedReplacement(t *testing.T) {
 
 func TestNativeReconcileSuccessfulClone(t *testing.T) {
 	f := newNativeCloneFixture(t, false, nil)
-	if _, err := nativeDispatch(t, f.r, f.m); err != nil {
-		t.Fatal(err)
+	f.dropReportReceipt()
+	// The first pass reads the report and records its receipt; the second completes from the receipt.
+	for range 2 {
+		if _, err := nativeDispatch(t, f.r, f.current()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	stored := &v1beta1.Migration{}
 	if f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), stored) != nil || !meta.IsStatusConditionTrue(stored.Status.Conditions, v1beta1.ConditionComplete) || nativeControlEnd(stored) != "" || f.logs != 1 {
@@ -395,7 +399,12 @@ func TestNativeUnreceiptedTerminalRejoin(t *testing.T) {
 				}
 				return
 			}
-			if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.logs != 1 {
+			f.dropReportReceipt()
+			var err error
+			for range 2 {
+				_, err = nativeDispatch(t, f.r, f.current())
+			}
+			if err != nil || f.logs != 1 {
 				t.Fatalf("stale display bypassed actual terminal clone consumer: %v logs=%d", err, f.logs)
 			}
 			stored := &v1beta1.Migration{}
@@ -589,6 +598,7 @@ func TestNativeUnreceiptedTerminalUnknown(t *testing.T) {
 	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)
 	}
+	f.dropReportReceipt()
 	f.raw = []byte("unavailable completed report\n")
 	if _, err := nativeDispatch(t, f.r, f.m); err == nil || f.patches != 0 || f.current().Status.NativeFinalizedJobUID != "" {
 		t.Fatal("stale generic Complete gained finalization without actual complete output", err)
@@ -602,7 +612,12 @@ func TestNativeIncompleteFinalizationRejoin(t *testing.T) {
 	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.logs != 1 || !nativeFinalizationRecorded(f.current()) {
+	f.dropReportReceipt()
+	var err error
+	for range 2 {
+		_, err = nativeDispatch(t, f.r, f.current())
+	}
+	if err != nil || f.logs != 1 || !nativeFinalizationRecorded(f.current()) {
 		t.Fatal("incomplete matching marker bypassed or refused fresh proof rejoin", err)
 	}
 }

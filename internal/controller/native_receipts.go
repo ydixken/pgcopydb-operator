@@ -85,7 +85,7 @@ func (r *MigrationReconciler) applyNativeAttemptReceipt(desired *v1beta1.Migrati
 	desired.Status.JobName = job.Name
 	desired.Status.NativeJobUID, desired.Status.NativePVCUID = string(job.UID), string(pvc.UID)
 	desired.Status.NativeJobSHA256, desired.Status.NativeWorkerIntent = digest, ""
-	desired.Status.NativeFinalizedJobUID = ""
+	desired.Status.NativeFinalizedJobUID, desired.Status.NativeReportJobUID = "", ""
 	if !native.NativeReceiptsMatch(desired, job.UID, pvc.UID) || len(digest) != 64 {
 		return false
 	}

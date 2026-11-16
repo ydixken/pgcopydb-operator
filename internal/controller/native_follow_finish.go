@@ -22,11 +22,13 @@ func (r *MigrationReconciler) finishNativeFollow(ctx context.Context, m, base *v
 	if err != nil {
 		return ctrl.Result{}, errNativeFollowCompletion
 	}
-	clone, err := r.readNativeCloneReport(ctx, entry, worker, pvc)
-	if err != nil || !r.nativeVerificationOriginalUnchanged(ctx, entry, worker, pvc, original) {
+	if handled, result, err := r.reconcileNativeFinishEntry(ctx, m, base, worker, pvc, original); handled {
+		return result, err
+	}
+	if !r.nativeVerificationOriginalUnchanged(ctx, entry, worker, pvc, original) {
 		return ctrl.Result{}, errNativeFollowCompletion
 	}
-	observation, cleaned, err := r.readNativeFinalizationObservation(ctx, entry, worker, pvc, clone)
+	observation, cleaned, err := r.readNativeFinalizationObservation(ctx, entry, worker, pvc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -85,7 +87,8 @@ func (r *MigrationReconciler) finishNativeFollow(ctx context.Context, m, base *v
 	return ctrl.Result{}, nil
 }
 
-func (r *MigrationReconciler) readNativeFinalizationObservation(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, clone *native.Report) (*native.CompletedObservation, bool, error) {
+// The completed-clone report reaches the target completion read through its receipt.
+func (r *MigrationReconciler) readNativeFinalizationObservation(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (*native.CompletedObservation, bool, error) {
 	observation, closed, err := r.captureNativeCleanedCompletedEvidence(ctx, m, worker, pvc)
 	if err == nil {
 		return observation, true, nil
@@ -101,7 +104,7 @@ func (r *MigrationReconciler) readNativeFinalizationObservation(ctx context.Cont
 	if !closed {
 		return nil, false, errNativeFollowCompletion
 	}
-	observation, err = r.readNativeFollowTargetCompletion(ctx, m, worker, pvc, clone)
+	observation, err = r.readNativeFollowTargetCompletion(ctx, m, worker, pvc, nil)
 	return observation, false, err
 }
 

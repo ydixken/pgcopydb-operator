@@ -8,10 +8,8 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
-	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 func (r *MigrationReconciler) nativeCompletionCurrent(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) (*v1beta1.Migration, *corev1.Pod, error) {
@@ -26,9 +24,9 @@ func (r *MigrationReconciler) nativeCompletionCurrent(ctx context.Context, m *v1
 		followEnabled(m) && nativeControlEnd(live) != nativeControlEnd(m) {
 		return nil, nil, errNativePreflightUnavailable
 	}
-	pod, err := r.nativeQuiescentWorker(ctx, live, current, claim)
-	if err != nil || ctx.Err() != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation ||
-		!apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !podexec.SamePodState(original, pod, workerContainer)) {
+	// Completion evidence comes from helper Jobs, so a finished worker without a pod still anchors it (lifecycle 1).
+	pod, err := r.nativeEngineFreeWorker(ctx, live, current, claim)
+	if err != nil || ctx.Err() != nil || !nativeSameWorkerPod(original, pod) {
 		return nil, nil, errNativePreflightUnavailable
 	}
 	return live, pod, nil
