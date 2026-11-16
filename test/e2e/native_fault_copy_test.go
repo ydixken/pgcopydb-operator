@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -262,21 +263,188 @@ func (b *nativeFaultBulk) expectAborted(xid string) {
 	Expect(status).To(Equal("aborted"), "the killed COPY transaction %s ended %q: the kill missed the COPY", xid, status)
 }
 
-// expectRows holds the bulk table to its row count: always on the source, after a
-// resume on the target, and all or nothing on a target that failed closed.
-func (b *nativeFaultBulk) expectRows(target string, resumed bool) {
+// expectRows holds the bulk table to the source: every row there and after a resume, and on a
+// target that failed closed exactly the rows of the parts its current copy generation recorded done.
+// Split parts commit one by one, so whole done parts are legitimate there.
+func (b *nativeFaultBulk) expectRows(target, run string, resumed bool) {
 	GinkgoHelper()
-	Expect(psqlInt(sourceCluster, "SELECT count(*) FROM ONLY "+nativeFaultBulkTable)).
-		To(BeNumerically("==", b.rows), "the source lost bulk rows")
+	read := func(cluster string, parts []nativeFaultDonePart) nativeFaultBulkContent {
+		content, err := parseNativeFaultBulkContent(psqlDBWithin(cluster, appDatabase(cluster),
+			nativeFaultBulkContentSQL(b.rows, parts), bulkWriteTimeout))
+		Expect(err).NotTo(HaveOccurred())
+		return content
+	}
+	Expect(read(sourceCluster, nil).whole(b.rows)).To(Succeed(), "the source lost or changed bulk rows")
 	if !resumed && psql(target, "SELECT to_regclass('"+nativeFaultBulkTable+"') IS NULL") == "t" {
 		return
 	}
-	got := int64(psqlInt(target, "SELECT count(*) FROM ONLY "+nativeFaultBulkTable))
 	if resumed {
-		Expect(got).To(Equal(b.rows), "INVARIANT VIOLATED: %d of %d bulk rows on the target", got, b.rows)
-	} else {
-		Expect(got).To(BeElementOf(int64(0), b.rows), "INVARIANT VIOLATED: a partial bulk COPY committed")
+		Expect(read(target, nil).whole(b.rows)).To(Succeed(), "INVARIANT VIOLATED: the resumed target bulk rows")
+		return
 	}
+	source, err := strconv.ParseUint(psql(sourceCluster, nativeFaultBulkOIDSQL), 10, 32)
+	Expect(err).NotTo(HaveOccurred(), "the source bulk table has no OID")
+	parts, err := parseNativeFaultDoneParts(psql(target, nativeFaultDonePartsSQL(run)))
+	Expect(err).NotTo(HaveOccurred(), "INVARIANT VIOLATED: the target's done parts")
+	for i := range parts {
+		Expect(parts[i].readSource(psql(sourceCluster, parts[i].sourceSQL()))).To(Succeed())
+	}
+	Expect(read(target, parts).failedClosed(parts, uint32(source))).
+		To(Succeed(), "INVARIANT VIOLATED: the failed-closed target bulk rows")
+}
+
+const (
+	nativeFaultBulkOID    = "to_regclass('" + nativeFaultBulkTable + "')::oid"
+	nativeFaultBulkOIDSQL = "SELECT " + nativeFaultBulkOID
+	// nativeFaultBulkMismatch admits a row only as one the source bulk table generated, so NULLs fail too.
+	nativeFaultBulkMismatch = "NOT coalesce(id BETWEEN 1 AND %d AND payload = repeat(md5(id::text), %d), false)"
+)
+
+// nativeFaultBulkContentSQL reads the bulk table's row count, distinct ids, rows unlike any source row,
+// and rows outside every one of parts' source id ranges.
+func nativeFaultBulkContentSQL(rows int64, parts []nativeFaultDonePart) string {
+	inside := "false"
+	for _, p := range parts {
+		inside += fmt.Sprintf(" OR id BETWEEN %d AND %d", p.lo, p.hi)
+	}
+	return "SELECT count(*) || '|' || count(DISTINCT id) || '|' || count(*) FILTER (WHERE " +
+		fmt.Sprintf(nativeFaultBulkMismatch, rows, nativeFaultBulkPayloadRepeat) + ") || '|' ||" +
+		" count(*) FILTER (WHERE NOT coalesce(" + inside + ", false)) FROM ONLY " + nativeFaultBulkTable
+}
+
+// nativeFaultDonePartsSQL reads the engine's owned control rows: how many clone controls the target
+// holds, then every bulk table part its current copy generation recorded done.
+func nativeFaultDonePartsSQL(run string) string {
+	schema := sqlIdent(nativeSchemaName(run))
+	return "WITH c AS (SELECT (clone_state::json->>'generation')::numeric AS generation FROM ONLY " + schema +
+		".checkpoint WHERE clone_state IS NOT NULL) SELECT (SELECT count(*) FROM c) || '|' || coalesce((SELECT" +
+		" string_agg(concat_ws(':', d.part_number, d.part_count, d.rows, d.source_table, d.start_block," +
+		" coalesce(d.end_block::text, '')), ',' ORDER BY d.part_number) FROM ONLY " + schema + ".copy_done d" +
+		" WHERE d.copy_generation = (SELECT generation FROM c) AND d.target_table = " + nativeFaultBulkOID +
+		"), '')"
+}
+
+type nativeFaultBulkContent struct{ rows, distinct, foreign, outside int64 }
+
+func parseNativeFaultBulkContent(out string) (nativeFaultBulkContent, error) {
+	var c nativeFaultBulkContent
+	fields := strings.Split(out, "|")
+	if len(fields) != 4 {
+		return c, fmt.Errorf("bulk content returned %q", out)
+	}
+	for i, field := range []*int64{&c.rows, &c.distinct, &c.foreign, &c.outside} {
+		n, err := strconv.ParseInt(fields[i], 10, 64)
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("bulk content returned %q", out)
+		}
+		*field = n
+	}
+	return c, nil
+}
+
+// whole is the source's bulk table, all of it and nothing else.
+func (c nativeFaultBulkContent) whole(rows int64) error {
+	if c.rows != rows || c.distinct != rows || c.foreign != 0 {
+		return fmt.Errorf("%d bulk rows, %d distinct ids and %d unlike the source, want %d of each and none unlike",
+			c.rows, c.distinct, c.foreign, rows)
+	}
+	return nil
+}
+
+// failedClosed requires each target row once, as the source holds it, inside a done part, and as many
+// rows as those parts recorded: so a torn, duplicated, extra or misplaced part fails.
+func (c nativeFaultBulkContent) failedClosed(parts []nativeFaultDonePart, source uint32) error {
+	var sum int64
+	seen := map[int]bool{}
+	for _, p := range parts {
+		if p.source != source || p.number < 1 || p.number > p.count || p.count != parts[0].count || seen[p.number] {
+			return fmt.Errorf("done part %+v is not one part of source table %d", p, source)
+		}
+		if p.sourceRows != p.rows || p.hi-p.lo+1 != p.rows {
+			return fmt.Errorf("done part %+v differs from the source rows in its blocks", p)
+		}
+		seen[p.number], sum = true, sum+p.rows
+	}
+	switch {
+	case c.foreign != 0:
+		return fmt.Errorf("%d target bulk rows are unlike any source row", c.foreign)
+	case c.distinct != c.rows:
+		return fmt.Errorf("%d target bulk rows hold %d distinct ids: rows were copied twice", c.rows, c.distinct)
+	case c.outside != 0:
+		return fmt.Errorf("%d target bulk rows lie outside every done part", c.outside)
+	case c.rows != sum:
+		return fmt.Errorf("%d target bulk rows, but the %d parts recorded done hold %d", c.rows, len(parts), sum)
+	}
+	return nil
+}
+
+// nativeFaultDonePart is one copy_done row of the bulk table, and the source ids its ctid blocks hold.
+type nativeFaultDonePart struct {
+	number, count      int
+	rows               int64
+	source             uint32
+	start              int64
+	end                string // empty: the part runs to the end of the table
+	sourceRows, lo, hi int64
+}
+
+func parseNativeFaultDoneParts(out string) ([]nativeFaultDonePart, error) {
+	controls, list, ok := strings.Cut(out, "|")
+	if !ok || controls != "1" {
+		return nil, fmt.Errorf("done parts returned %q, not one clone control", out)
+	}
+	var parts []nativeFaultDonePart
+	for entry := range strings.SplitSeq(list, ",") {
+		if list == "" {
+			break
+		}
+		f := strings.Split(entry, ":")
+		if len(f) != 6 {
+			return nil, fmt.Errorf("done part %q", entry)
+		}
+		var p nativeFaultDonePart
+		var errs [5]error
+		p.number, errs[0] = strconv.Atoi(f[0])
+		p.count, errs[1] = strconv.Atoi(f[1])
+		p.rows, errs[2] = strconv.ParseInt(f[2], 10, 64)
+		source, err := strconv.ParseUint(f[3], 10, 32)
+		p.source, errs[3] = uint32(source), err
+		p.start, errs[4] = strconv.ParseInt(f[4], 10, 64)
+		if err := errors.Join(errs[:]...); err != nil || p.rows < 0 || p.start < 0 {
+			return nil, fmt.Errorf("done part %q: %v", entry, err)
+		}
+		if p.end = f[5]; p.end != "" {
+			if end, err := strconv.ParseInt(p.end, 10, 64); err != nil || end <= p.start {
+				return nil, fmt.Errorf("done part %q ends at block %q", entry, p.end)
+			}
+		}
+		parts = append(parts, p)
+	}
+	return parts, nil
+}
+
+// sourceSQL reads the source rows in the part's half-open ctid block range, as the engine copies it.
+func (p nativeFaultDonePart) sourceSQL() string {
+	predicate := fmt.Sprintf("ctid >= '(%d,0)'::tid", p.start)
+	if p.end != "" {
+		predicate += fmt.Sprintf(" AND ctid < '(%s,0)'::tid", p.end)
+	}
+	return "SELECT count(*) || '|' || coalesce(min(id), 0) || '|' || coalesce(max(id), -1) FROM ONLY " +
+		nativeFaultBulkTable + " WHERE " + predicate
+}
+
+func (p *nativeFaultDonePart) readSource(out string) error {
+	fields := strings.Split(out, "|")
+	if len(fields) == 3 {
+		var errs [3]error
+		p.sourceRows, errs[0] = strconv.ParseInt(fields[0], 10, 64)
+		p.lo, errs[1] = strconv.ParseInt(fields[1], 10, 64)
+		p.hi, errs[2] = strconv.ParseInt(fields[2], 10, 64)
+		if errors.Join(errs[:]...) == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("source rows of done part %+v returned %q", *p, out)
 }
 
 // report records a midCopy sample, so bytes is above zero. With several streams the window
@@ -399,6 +567,185 @@ func TestNativeFaultCopySplitBinary(t *testing.T) {
 	}
 	if _, err := parseNativeFaultCopy(out, nativeFaultBulkSize{text: 1000, binaryRows: 1100}); err == nil {
 		t.Fatal("parts past the binary size were admitted")
+	}
+}
+
+// TestNativeFaultFailedClosed holds a failed-closed target to whole done parts: two of three parts done.
+func TestNativeFaultFailedClosed(t *testing.T) {
+	const source = 16384
+	part := func(number, count int, rows, lo int64) nativeFaultDonePart {
+		return nativeFaultDonePart{number: number, count: count, rows: rows, source: source,
+			sourceRows: rows, lo: lo, hi: lo + rows - 1}
+	}
+	done := []nativeFaultDonePart{part(1, 3, 300, 1), part(3, 3, 200, 501)}
+	whole := nativeFaultBulkContent{rows: 500, distinct: 500}
+	unsplit := part(1, 1, 900, 1)
+	for _, tc := range []struct {
+		name    string
+		content nativeFaultBulkContent
+		parts   []nativeFaultDonePart
+	}{
+		{"no part done and no row", nativeFaultBulkContent{}, nil},
+		{"whole done parts", whole, done},
+		{"one unsplit part", nativeFaultBulkContent{rows: 900, distinct: 900}, []nativeFaultDonePart{unsplit}},
+		{"an empty done part", whole, append([]nativeFaultDonePart{{number: 2, count: 3, source: source, hi: -1}}, done...)},
+	} {
+		if err := tc.content.failedClosed(tc.parts, source); err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+	marker := func(change func(*nativeFaultDonePart)) []nativeFaultDonePart {
+		parts := slices.Clone(done)
+		change(&parts[1])
+		return parts
+	}
+	for _, tc := range []struct {
+		name    string
+		content nativeFaultBulkContent
+		parts   []nativeFaultDonePart
+	}{
+		{"a torn part", nativeFaultBulkContent{rows: 499, distinct: 499}, done},
+		{"a duplicated part", nativeFaultBulkContent{rows: 700, distinct: 500}, done},
+		{"a duplicated row in place of a torn one", nativeFaultBulkContent{rows: 500, distinct: 499}, done},
+		{"an extra row of an undone part", nativeFaultBulkContent{rows: 501, distinct: 501, outside: 1}, done},
+		{"an extra row unlike the source", nativeFaultBulkContent{rows: 501, distinct: 501, foreign: 1}, done},
+		{"a row changed from the source", nativeFaultBulkContent{rows: 500, distinct: 500, foreign: 1}, done},
+		{"a part copied from the wrong blocks", nativeFaultBulkContent{rows: 500, distinct: 500, outside: 200}, done},
+		{"a count that matches no done-part sum", whole, done[:1]},
+		{"rows with no part done", nativeFaultBulkContent{rows: 300, distinct: 300}, nil},
+		{"a part number twice", whole, marker(func(p *nativeFaultDonePart) { p.number = 1 })},
+		{"part number zero", whole, marker(func(p *nativeFaultDonePart) { p.number = 0 })},
+		{"a part past its count", whole, marker(func(p *nativeFaultDonePart) { p.number = 4 })},
+		{"two part counts", whole, marker(func(p *nativeFaultDonePart) { p.count = 4 })},
+		{"another source table", whole, marker(func(p *nativeFaultDonePart) { p.source++ })},
+		{"a marker over its blocks' rows", whole, marker(func(p *nativeFaultDonePart) { p.sourceRows-- })},
+		{"blocks of scattered ids", whole, marker(func(p *nativeFaultDonePart) { p.hi++ })},
+	} {
+		if err := tc.content.failedClosed(tc.parts, source); err == nil {
+			t.Errorf("%s admitted", tc.name)
+		}
+	}
+	if err := whole.whole(500); err != nil {
+		t.Error(err)
+	}
+	for _, c := range []nativeFaultBulkContent{{rows: 499, distinct: 499}, {rows: 500, distinct: 499},
+		{rows: 500, distinct: 500, foreign: 1}} {
+		if c.whole(500) == nil {
+			t.Errorf("%+v read as the whole bulk table", c)
+		}
+	}
+	parts, err := parseNativeFaultDoneParts("1|1:3:300:16384:0:10,3:3:200:16384:20:")
+	want := []nativeFaultDonePart{{number: 1, count: 3, rows: 300, source: source, end: "10"},
+		{number: 3, count: 3, rows: 200, source: source, start: 20}}
+	if err != nil || !slices.Equal(parts, want) {
+		t.Errorf("done parts = %+v, %v; want %+v", parts, err, want)
+	}
+	if parts, err := parseNativeFaultDoneParts("1|"); err != nil || len(parts) != 0 {
+		t.Errorf("no done part = %+v, %v", parts, err)
+	}
+	for _, out := range []string{"", "0|", "2|", "|", "1", "1|1:3:300:16384:0", "1|x:3:300:16384:0:", "1|1:3:-1:16384:0:",
+		"1|1:3:300:4294967296:0:", "1|1:3:300:16384:-1:", "1|1:3:300:16384:5:5", "1|1:3:300:16384:5:x",
+		"1|1:3:300:16384:0:,"} {
+		if _, err := parseNativeFaultDoneParts(out); err == nil {
+			t.Errorf("done parts %q admitted", out)
+		}
+	}
+	for _, out := range []string{"", "1|1|0", "1|1|0|0|0", "x|1|0|0", "1|1|-1|0"} {
+		if _, err := parseNativeFaultBulkContent(out); err == nil {
+			t.Errorf("bulk content %q admitted", out)
+		}
+	}
+	p := nativeFaultDonePart{}
+	for _, out := range []string{"", "1|1", "x|1|1", "1|1|1|1"} {
+		if p.readSource(out) == nil {
+			t.Errorf("source rows %q admitted", out)
+		}
+	}
+}
+
+// TestNativeFaultFailedClosedSQL runs the done-part and content SQL against a real server, over control
+// rows shaped like the engine's: one current part done, a stale generation's part, and another table's.
+func TestNativeFaultFailedClosedSQL(t *testing.T) {
+	run := testPSQL(t)
+	const id = "0123456789abcdef0123456789abcdef"
+	schema := sqlIdent(nativeSchemaName(id))
+	t.Cleanup(func() {
+		testQuery(t, run, "DROP TABLE IF EXISTS "+nativeFaultBulkTable+"; DROP SCHEMA IF EXISTS "+schema+" CASCADE")
+	})
+	testQuery(t, run, nativeFaultBulkSQL(64))
+	content := func(script string, parts []nativeFaultDonePart) nativeFaultBulkContent {
+		t.Helper()
+		c, err := parseNativeFaultBulkContent(testQuery(t, run, script+nativeFaultBulkContentSQL(64, parts)+"; ROLLBACK"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if err := content("BEGIN; ", nil).whole(64); err != nil {
+		t.Fatal(err)
+	}
+	if err := content("BEGIN; UPDATE "+nativeFaultBulkTable+" SET payload = payload || 'x' WHERE id = 7; ", nil).
+		whole(64); err == nil {
+		t.Fatal("a changed payload read as the source's")
+	}
+	oid := testQuery(t, run, nativeFaultBulkOIDSQL)
+	marker := func(generation, number int, start, end string) string {
+		return fmt.Sprintf("INSERT INTO %s.copy_done SELECT %d, %s, %s, count(*), %d, 2, %s, %s FROM ONLY %s"+
+			" WHERE ctid >= '(%s,0)'::tid AND (%[7]s IS NULL OR ctid < ('(' || %[7]s || ',0)')::tid);",
+			schema, generation, oid, oid, number, start, end, nativeFaultBulkTable, start)
+	}
+	testQuery(t, run, "CREATE SCHEMA "+schema+"; CREATE TABLE "+schema+".checkpoint (clone_state text);"+
+		" CREATE TABLE "+schema+".copy_done (copy_generation numeric, source_table oid, target_table oid, rows numeric,"+
+		" part_number int4, part_count int4, start_block int8, end_block int8);"+
+		" INSERT INTO "+schema+".checkpoint VALUES ('{\"generation\":2,\"phase\":\"copying\"}'), (NULL);"+
+		marker(2, 1, "0", "1")+marker(1, 2, "1", "NULL")+
+		" INSERT INTO "+schema+".copy_done SELECT copy_generation, source_table, 1, rows, 2, 2, 1, NULL FROM "+
+		schema+".copy_done WHERE part_number = 1;")
+	parts, err := parseNativeFaultDoneParts(testQuery(t, run, nativeFaultDonePartsSQL(id)))
+	if err != nil || len(parts) != 1 || parts[0].number != 1 || parts[0].start != 0 || parts[0].end != "1" {
+		t.Fatalf("done parts = %+v, %v; want part 1 of generation 2 alone", parts, err)
+	}
+	if err := parts[0].readSource(testQuery(t, run, parts[0].sourceSQL())); err != nil {
+		t.Fatal(err)
+	}
+	if p := parts[0]; p.rows <= 0 || p.rows >= 64 || p.sourceRows != p.rows || p.lo != 1 || p.hi != p.rows {
+		t.Fatalf("part 1 = %+v, want the first block's ids 1 to %d", p, p.rows)
+	}
+	source, _ := strconv.ParseUint(oid, 10, 32)
+	// The target that failed closed holds part 1 alone; each mutation rolls back.
+	testQuery(t, run, "DELETE FROM "+nativeFaultBulkTable+" WHERE ctid >= '(1,0)'::tid")
+	if err := content("BEGIN; ", parts).failedClosed(parts, uint32(source)); err != nil {
+		t.Fatalf("the whole done part was refused: %v", err)
+	}
+	bulk := nativeFaultBulkTable
+	// The engine builds the primary key after the data, so a failed-closed target may lack it.
+	unkeyed := "ALTER TABLE " + bulk + " DROP CONSTRAINT e2e_nfault_bulk_pkey, ALTER id DROP NOT NULL; "
+	for _, mutation := range []string{
+		"DELETE FROM " + bulk + " WHERE id = 1",
+		unkeyed + "INSERT INTO " + bulk + " SELECT * FROM " + bulk + " WHERE id = 1",
+		fmt.Sprintf("INSERT INTO %s VALUES (64, repeat(md5('64'), %d))", bulk, nativeFaultBulkPayloadRepeat),
+		fmt.Sprintf("DELETE FROM %s WHERE id = 1; INSERT INTO %[1]s VALUES (64, repeat(md5('64'), %d))", bulk,
+			nativeFaultBulkPayloadRepeat),
+		"UPDATE " + bulk + " SET payload = 'x' WHERE id = 1",
+		unkeyed + "INSERT INTO " + bulk + " SELECT NULL, payload FROM " + bulk + " WHERE id = 1",
+	} {
+		if err := content("BEGIN; "+mutation+"; ", parts).failedClosed(parts, uint32(source)); err == nil {
+			t.Errorf("a target after %q admitted", mutation)
+		}
+	}
+	for script, want := range map[string]string{
+		"DELETE FROM " + schema + ".checkpoint": "0|",
+		"UPDATE " + schema + ".checkpoint SET clone_state = '{\"generation\":3}' WHERE clone_state IS NOT NULL": "1|",
+	} {
+		if got := testQuery(t, run, "BEGIN; "+script+"; "+nativeFaultDonePartsSQL(id)+"; ROLLBACK"); got != want {
+			t.Errorf("after %s the done parts read %q, want %q", script, got, want)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := run(ctx, "BEGIN; UPDATE "+schema+".checkpoint SET clone_state = '{\"generation\":2}';"+
+		nativeFaultDonePartsSQL(id)+"; ROLLBACK"); err == nil {
+		t.Errorf("two clone controls read as %q", out)
 	}
 }
 

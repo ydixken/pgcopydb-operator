@@ -164,7 +164,10 @@ After the kill it requires that transaction to end aborted, which proves the kil
 The `native fault copy kill` entry in `go-test.json` records the format, the number of COPYs, the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, the number of probes, the longest time between two probe starts (`probe_gap_max`), and the longest single `psql` exec (`probe_exec_max`).
 When the first probe already sees the COPY there is no gap to measure, so `probe_gap_max` reads `unmeasured`; one probe cycle then takes about `probe_exec_max` plus the 250 ms poll.
 Keep the projected window at least four times `probe_gap_max` (or that cycle when it is unmeasured), and grow the table if a run shows less.
-The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
+The invariant checks the table too: every row on the source and on a resumed target, each as the source generated it.
+Split parts commit one by one, so a target that failed closed may hold whole parts.
+There every row must be a distinct source row inside the source blocks of a part that the engine's `_rpgmigrate_<run>.copy_done` rows record done for the copy generation in `_rpgmigrate_<run>.checkpoint`, and the row count must equal the sum of those parts' rows.
+A torn, duplicated, extra or misplaced part fails, and so does a target bulk table without exactly one clone control.
 The spec drops it from the source after the Migration's own cleanup.
 The fault specs find the engine's sessions by their `rpgmigrate[<pid>] <role>` names.
 Each one first requires that count above zero on the source and the target while the engine runs, and only then admits a later zero as the sessions having ended.
