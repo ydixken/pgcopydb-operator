@@ -55,6 +55,7 @@ func newNativeRecoveryFixture(t *testing.T, attempt int32) *nativeRecoveryFixtur
 	}
 	worker.UID = "recovery-original-job"
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
+	m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
 	worker.Status.Failed = 1
 	worker.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
 	pod := nativeRecoveryTestPod(worker, 1)

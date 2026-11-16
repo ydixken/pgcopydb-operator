@@ -103,6 +103,7 @@ func newNativeFailedWorkerEnv(ctx context.Context, name string, deleting bool) *
 		m.Status.Phase = v1beta1.PhaseCloning
 	}
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
+	m.Status.NativeJobSHA256 = nativeTestDigest(GinkgoT(), worker)
 	Expect(c.Status().Update(ctx, m)).To(Succeed())
 	if deleting {
 		Expect(c.Delete(ctx, m)).To(Succeed())

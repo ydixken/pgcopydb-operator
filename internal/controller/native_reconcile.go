@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -14,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -89,10 +91,14 @@ func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1be
 		metrics.Record(m)
 		return ctrl.Result{}, nil
 	}
-	worker, pvc, err := r.nativeReconcileResources(ctx, m)
+	state, err := r.nativeReconcileResources(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if handled, result, err := r.reconcileNativeWorkerState(ctx, m, base, state); handled {
+		return result, err
+	}
+	worker, pvc := state.worker, state.pvc
 	if handled, result, err := r.reconcileNativeDisposition(ctx, m, base, worker, pvc); handled || err != nil {
 		return result, err
 	}
@@ -100,7 +106,7 @@ func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1be
 		return ctrl.Result{}, errNativeReconcile
 	}
 	if m.Status.Attempts == 0 {
-		if worker != nil || m.Status.JobName != "" || m.Status.NativeJobUID != "" || m.Status.NativePVCUID != "" || m.Status.NativeSchemaJobUID != "" || m.Status.NativeDataJobUID != "" || nativeControlEnd(m) != "" {
+		if worker != nil || nativeStartResidue(m) {
 			return ctrl.Result{}, errNativeReconcile
 		}
 		if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed) {
@@ -142,6 +148,12 @@ func nativeFailedAbsorbs(m *v1beta1.Migration) bool {
 	return m.DeletionTimestamp.IsZero() && m.Status.Phase == v1beta1.PhaseFailed && meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)
 }
 
+// nativeStartResidue reports attempt-0 status that only a recorded or intended attempt could have written.
+func nativeStartResidue(m *v1beta1.Migration) bool {
+	return m.Status.JobName != "" || m.Status.NativeJobUID != "" || m.Status.NativePVCUID != "" || m.Status.NativeSchemaJobUID != "" ||
+		m.Status.NativeDataJobUID != "" || nativeControlEnd(m) != "" || m.Status.NativeWorkerIntent != ""
+}
+
 func (r *MigrationReconciler) reconcileNativeHistory(ctx context.Context, m, base *v1beta1.Migration) (bool, ctrl.Result, error) {
 	if marker := m.Status.NativeFinalizedJobUID; marker != "" && marker != m.Status.NativeJobUID {
 		return true, ctrl.Result{}, errNativeFinalizationReceiptConflict
@@ -180,43 +192,94 @@ func (r *MigrationReconciler) nativeReconcileCurrent(ctx context.Context, m, bas
 	return live, nil
 }
 
-func (r *MigrationReconciler) nativeReconcileResources(ctx context.Context, m *v1beta1.Migration) (*batchv1.Job, *corev1.PersistentVolumeClaim, error) {
+// nativeReconcileResources resolves V, N and W from uncached reads; it refuses only a status that
+// contradicts itself or an unavailable API, and leaves every object state to the tables.
+func (r *MigrationReconciler) nativeReconcileResources(ctx context.Context, m *v1beta1.Migration) (nativeWorkerState, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if m.Status.Attempts < 0 || m.Status.Attempts == int32(1<<31-1) && m.Status.JobName == "" {
-		return nil, nil, errNativeReconcile
+	var s nativeWorkerState
+	n := m.Status.Attempts
+	if n < 0 || n == int32(1<<31-1) || n > 0 && (m.Status.JobName != jobName(m, n) || !native.NativeReceiptsMatch(m, types.UID(m.Status.NativeJobUID), types.UID(m.Status.NativePVCUID)) || m.Status.NativeJobSHA256 == "") ||
+		n == 0 && (m.Status.JobName != "" || m.Status.NativeJobUID != "" || m.Status.NativePVCUID != "" || m.Status.NativeJobSHA256 != "") {
+		return s, errNativeReconcile
 	}
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: workPVCName(m)}, pvc)
-	if apierrors.IsNotFound(err) {
-		pvc = nil
-	} else if err != nil {
-		return nil, nil, errNativeReconcile
-	} else if _, err := nativeWorkIdentity(m, pvc); err != nil {
-		return nil, nil, errNativeReconcile
-	}
-	name := m.Status.JobName
-	if name == "" {
-		// A missing receipt cannot hide the canonical worker after an unknown Create response.
-		name = jobName(m, m.Status.Attempts+1)
-	}
-	worker := &batchv1.Job{}
-	err = r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: name}, worker)
-	if apierrors.IsNotFound(err) {
-		worker = nil
-	} else if err != nil {
-		return nil, nil, errNativeReconcile
-	}
-	if ctx.Err() != nil || m.Status.Attempts > 0 && (worker == nil || pvc == nil || m.Status.JobName != jobName(m, m.Status.Attempts) || !native.NativeReceiptsMatch(m, worker.UID, pvc.UID)) {
-		return nil, nil, errNativeReconcile
-	}
-	if m.Status.Attempts > 0 {
-		expected, err := buildNativeWorkerJob(m, pvc, r.RPGMigrateRunnerImage, m.Status.Attempts)
-		if err != nil || controllerutil.SetControllerReference(m, expected, r.Scheme) != nil || !nativePreflightJobMatches(expected, worker) {
-			return nil, nil, errNativeReconcile
+	for _, resolve := range []func(context.Context, *v1beta1.Migration, *nativeWorkerState) error{r.nativeResolveVolume, r.nativeResolveNext, r.nativeResolveWorker} {
+		if err := resolve(ctx, m, &s); err != nil {
+			return s, errNativeReconcile
 		}
 	}
-	return worker, pvc, nil
+	if ctx.Err() != nil {
+		return s, errNativeReconcile
+	}
+	return s, nil
+}
+
+func (r *MigrationReconciler) nativeResolveVolume(ctx context.Context, m *v1beta1.Migration, s *nativeWorkerState) error {
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: workPVCName(m)}, pvc)
+	switch {
+	case apierrors.IsNotFound(err):
+		s.v = volumeAbsent
+		if m.Status.Attempts > 0 {
+			s.v = volumeLost
+		}
+	case err != nil:
+		return err
+	default:
+		if _, idErr := nativeWorkIdentity(m, pvc); idErr != nil || m.Status.Attempts > 0 && string(pvc.UID) != m.Status.NativePVCUID {
+			s.v = volumeLost
+		} else {
+			s.v, s.pvc = volumeBound, pvc
+		}
+	}
+	return nil
+}
+
+// nativeResolveNext is R2's read: a missing receipt cannot hide a worker after an unknown Create response.
+func (r *MigrationReconciler) nativeResolveNext(ctx context.Context, m *v1beta1.Migration, s *nativeWorkerState) error {
+	next := &batchv1.Job{}
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: jobName(m, m.Status.Attempts+1)}, next)
+	switch {
+	case apierrors.IsNotFound(err):
+		s.n = nextAbsent
+		if m.Status.NativeWorkerIntent != "" {
+			s.n = nextAbandoned
+		}
+	case err != nil:
+		return err
+	case !nativeEvidenceOwnedBy(next, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()):
+		s.n, s.next = nextForeign, next
+	case !next.DeletionTimestamp.IsZero():
+		s.n, s.next = nextTerminating, next
+	case nativeIntentAdmits(m, next):
+		s.n, s.next = nextAdoptable, next
+	default:
+		s.n, s.next = nextUnadmitted, next
+	}
+	return nil
+}
+
+func (r *MigrationReconciler) nativeResolveWorker(ctx context.Context, m *v1beta1.Migration, s *nativeWorkerState) error {
+	if m.Status.Attempts == 0 {
+		return nil
+	}
+	worker := &batchv1.Job{}
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: m.Status.JobName}, worker)
+	switch {
+	case apierrors.IsNotFound(err):
+		s.w, s.worker = workerGone, nativeMissingWorker(m)
+	case err != nil:
+		return err
+	case string(worker.UID) != m.Status.NativeJobUID:
+		s.w, s.worker = workerForeign, worker
+	case !worker.DeletionTimestamp.IsZero() || worker.Status.Terminating != nil && *worker.Status.Terminating != 0:
+		s.w, s.worker = workerTerminating, worker
+	case !nativeWorkerAdmitted(m, worker):
+		s.w, s.worker = workerModified, worker
+	default:
+		s.w, s.worker = workerAdmitted, worker
+	}
+	return nil
 }
 
 func (r *MigrationReconciler) reconcileNativeStart(ctx context.Context, m, base *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
@@ -324,4 +387,104 @@ func (r *MigrationReconciler) reconcileNativeRunning(ctx context.Context, m, bas
 		return r.reconcileNativeFollowCutover(ctx, m, worker, pvc, got.catchUpConfirmed)
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
+}
+
+// reconcileNativeWorkerState applies the N table on every path, the W rows every path shares, and the
+// retry and running columns of the W table; the suspend and deletion columns stay with disposition.
+func (r *MigrationReconciler) reconcileNativeWorkerState(ctx context.Context, m, base *v1beta1.Migration, s nativeWorkerState) (bool, ctrl.Result, error) {
+	if handled, result, err := r.reconcileNativeNext(ctx, m, base, s); handled {
+		return handled, result, err
+	}
+	switch s.w {
+	case workerForeign:
+		return r.holdNative(ctx, m, base, v1beta1.ReasonForeignObject, fmt.Sprintf(
+			"Job %s has UID %s, not the recorded native worker %s; the operator neither runs nor removes it", s.worker.Name, s.worker.UID, m.Status.NativeJobUID))
+	case workerTerminating:
+		return r.holdNative(ctx, m, base, v1beta1.ReasonWorkerPodRemains, fmt.Sprintf(
+			"Native worker Job %s is being deleted or has terminating pods; the operator waits until they are gone", s.worker.Name))
+	}
+	if !m.DeletionTimestamp.IsZero() || m.Spec.Suspend {
+		// The suspend and delete columns for a modified W and a lost V belong to disposition.
+		if s.w == workerModified || m.Status.Attempts > 0 && s.v != volumeBound {
+			return true, ctrl.Result{}, errNativeReconcile
+		}
+		return false, ctrl.Result{}, nil
+	}
+	if s.v == volumeLost {
+		if m.Status.Attempts == 0 {
+			return r.holdNative(ctx, m, base, v1beta1.ReasonForeignObject, fmt.Sprintf(
+				"PVC %s is not a live work volume of this Migration (foreign, replaced or deleting); the operator neither uses nor removes it", workPVCName(m)))
+		}
+		return true, ctrl.Result{}, errNativeReconcile
+	}
+	return r.reconcileNativeLiveWorker(ctx, m, base, s)
+}
+
+// reconcileNativeNext is the N table, which every path applies before it looks at W (R2).
+func (r *MigrationReconciler) reconcileNativeNext(ctx context.Context, m, base *v1beta1.Migration, s nativeWorkerState) (bool, ctrl.Result, error) {
+	n := m.Status.Attempts
+	switch s.n {
+	case nextAbandoned:
+		// The intent's Create never landed; admission runs again on a later pass, never in this one.
+		desired := m.DeepCopy()
+		desired.Status.NativeWorkerIntent = ""
+		return r.patchNativeWorkerState(ctx, m, base, desired)
+	case nextForeign:
+		return r.holdNative(ctx, m, base, v1beta1.ReasonForeignObject, fmt.Sprintf(
+			"Job %s is not controlled by this Migration; the operator neither runs nor removes it, and attempt %d waits until it is gone", s.next.Name, n+1))
+	case nextTerminating:
+		return r.holdNative(ctx, m, base, v1beta1.ReasonWorkerPodRemains, fmt.Sprintf(
+			"Native worker Job %s is being deleted; the operator waits until it and its pods are gone", s.next.Name))
+	case nextAdoptable, nextUnadmitted:
+		// Only an engine-free W can hand its place to N; a receipt for N must never orphan a running W.
+		if s.v != volumeBound || s.w != workerNone && s.w != workerGone && (s.w != workerAdmitted || !nativeWorkerEnded(s.worker)) {
+			return r.holdNative(ctx, m, base, v1beta1.ReasonStatusIntegrity, fmt.Sprintf(
+				"Native worker Job %s exists while attempt %d has not ended or its work PVC is not bound; the operator does not record it", s.next.Name, n))
+		}
+		if s.n == nextAdoptable {
+			return r.adoptNativeAttempt(ctx, m, base, s.next, s.pvc)
+		}
+		return r.recordNativeUnadmittedAttempt(ctx, m, base, s.next, s.pvc)
+	}
+	return false, ctrl.Result{}, nil
+}
+
+// reconcileNativeLiveWorker is the W table's retry and running columns for a modified W, R7, and the
+// Blocked clear of the first pass that proceeds.
+func (r *MigrationReconciler) reconcileNativeLiveWorker(ctx context.Context, m, base *v1beta1.Migration, s nativeWorkerState) (bool, ctrl.Result, error) {
+	if s.w == workerModified && !onFailurePath(m) {
+		if !nativeWorkerEnded(s.worker) {
+			return r.holdNative(ctx, m, base, v1beta1.ReasonWorkerModified, fmt.Sprintf(
+				"Native worker Job %s no longer matches the Job admitted for attempt %d; restore it to let the attempt continue", s.worker.Name, m.Status.Attempts))
+		}
+		desired := m.DeepCopy()
+		r.countNativeAttempt(desired, fmt.Sprintf("Native worker Job %s no longer matches its admission", s.worker.Name))
+		desired.Status.ObservedGeneration = desired.Generation
+		return r.patchNativeWorkerState(ctx, m, base, desired)
+	}
+	// R7: a counted attempt keeps no Job that is not its failed worker; the gate then follows a gone W.
+	if onFailurePath(m) && (s.w == workerModified || s.w == workerAdmitted && !nativeRecoveryWorkerFailed(s.worker)) {
+		done, err := r.dropNativeWorker(ctx, m, s.worker)
+		if err != nil {
+			return true, ctrl.Result{}, err
+		}
+		if !done {
+			return true, ctrl.Result{RequeueAfter: pollInterval}, nil
+		}
+		return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
+	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionBlocked) {
+		desired := m.DeepCopy()
+		r.clearNativeBlocked(desired)
+		return r.patchNativeWorkerState(ctx, m, base, desired)
+	}
+	return false, ctrl.Result{}, nil
+}
+
+func (r *MigrationReconciler) patchNativeWorkerState(ctx context.Context, m, base, desired *v1beta1.Migration) (bool, ctrl.Result, error) {
+	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return true, ctrl.Result{}, nativeWorkerError(err)
+	}
+	desired.DeepCopyInto(m)
+	return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
 }

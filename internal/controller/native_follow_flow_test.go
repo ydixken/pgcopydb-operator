@@ -31,6 +31,7 @@ func nativeFollowFlowFixture(t *testing.T) *nativeControlFixture {
 	}
 	m := f.current()
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(f.worker.UID), string(f.pvc.UID)
+	m.Status.NativeJobSHA256 = nativeTestDigest(t, f.worker)
 	if err := f.store.Status().Update(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}

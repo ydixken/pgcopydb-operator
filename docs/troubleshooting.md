@@ -453,6 +453,7 @@ The alert keeps firing while `RetryHeld` is True, because the rule reads both co
 
 So that the commits of the copy do not wait for a standby, set [`spec.target.synchronousCommit: local`](configuration.md#synchronous-commit-on-the-target).
 Apply still waits for a standby, because a lost apply commit would lose source changes permanently.
+This remedy is for `spec.engine: pgcopydb` only: native admission refuses `synchronousCommit`, and a native Migration that sets it after admission starts no further attempt.
 
 When a sample cannot read the count, the operator logs `progress sample lost the SyncRep count; until it answers again, CommitsBlocked stays True or turns Unknown`.
 A True condition stays True until a sample shows no wait of 30 seconds or more, or until the worker succeeds.
@@ -491,6 +492,9 @@ If a probe pod cannot start, the reason changes to `ProbeFailed` with the kubele
 `WorkerPodRemains` means that a pod of the previous attempt's worker, or of a canceled verification rehearsal, has not ended.
 The message names the pod and its node.
 A pod on a lost node holds the retry until the pod object is gone.
+With `spec.engine: rpgmigrate`, the operator also finds a worker pod by its `batch.kubernetes.io/controller-uid` label after its owner reference is gone.
+A finished native worker whose pod object vanished does not hold the retry, because a finished Job never starts another pod.
+A native worker Job that vanished counts as a failed attempt toward `backoffLimit`.
 The drain verify waits for a rehearsal pod the same way, with [`RehearsalPodRemains`](#cutovercompleted-is-unknown-with-reason-rehearsalpodremains).
 
 > [!warning]

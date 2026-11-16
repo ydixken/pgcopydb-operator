@@ -235,7 +235,8 @@ func TestNativeWorkerDispatch(t *testing.T) {
 			}
 		}
 		res, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy())
-		if err != nil || res.RequeueAfter != pollInterval || f.creates != 1 || f.patches != 1 {
+		// One intent patch before the Create, one receipt patch after it.
+		if err != nil || res.RequeueAfter != pollInterval || f.creates != 1 || f.patches != 2 {
 			t.Fatal("native first attempt did not create and record once", err)
 		}
 		got := f.storedMigration()
@@ -246,7 +247,7 @@ func TestNativeWorkerDispatch(t *testing.T) {
 		if err := f.store.Get(context.Background(), types.NamespacedName{Namespace: f.m.Namespace, Name: got.Status.JobName}, job); err != nil {
 			t.Fatal(err)
 		}
-		if job.UID != workerServerUID || !nativeWorkerJobMatches(f.m, f.pvc, f.expected(), job) {
+		if job.UID != workerServerUID || !nativeWorkerAdmitted(got, job) || got.Status.NativeWorkerIntent != "" {
 			t.Fatal("recorded worker was not actual server identity")
 		}
 		if len(f.r.Recorder.(*events.FakeRecorder).Events) != 1 {
@@ -272,7 +273,7 @@ func TestNativeWorkerDispatch(t *testing.T) {
 			if stage == 3 {
 				creates = 1
 			}
-			if err == nil || f.creates != creates || f.patches != 0 || f.storedMigration().Status.JobName != "concurrent-worker" {
+			if err == nil || f.creates != creates || f.patches != creates || f.storedMigration().Status.JobName != "concurrent-worker" {
 				t.Fatal("changed attempt was overwritten or replayed")
 			}
 		})
@@ -359,7 +360,7 @@ func workerAttemptBindingRaces(t *testing.T) {
 					// The first read binds the current owned claim; later the binder may only fill an empty volumeName.
 					if kind == workerReadPVC && (stage == 1 && field != workerOwnerCase || field == workerBindCase) {
 						got := f.storedMigration()
-						if err != nil || f.creates != 1 || f.patches != 1 || got.Status.Attempts != 1 || got.Status.NativePVCUID != string(f.pvc.UID) && field != workerUIDCase {
+						if err != nil || f.creates != 1 || f.patches != 2 || got.Status.Attempts != 1 || got.Status.NativePVCUID != string(f.pvc.UID) && field != workerUIDCase {
 							t.Fatal("valid current PVC identity was refused", err)
 						}
 						return
@@ -368,7 +369,8 @@ func workerAttemptBindingRaces(t *testing.T) {
 					if stage == 3 {
 						creates = 1
 					}
-					f.refused(err, creates, 0)
+					// The intent is durable before the Create, so a refusal after it leaves one patch.
+					f.refused(err, creates, creates)
 				})
 			}
 		}
@@ -528,15 +530,15 @@ func TestNativeWorkerCreateUncertainty(t *testing.T) {
 				return nil
 			}
 			if name == workerStatusUnavailableCase {
-				f.patch = func(context.Context, client.Client, client.Object, client.Patch) error {
+				f.patch = nativeTestAfterIntent(func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
 					return errors.New(workerAttemptCanary)
-				}
+				})
 			}
 			_, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy())
 
-			patches := 0
+			patches := 1
 			if name == workerStatusUnavailableCase {
-				patches = 1
+				patches = 2
 			}
 			f.refused(err, 1, patches)
 			if name == workerLostAckCase || name == workerUnknownCreateCase {
@@ -556,7 +558,7 @@ func workerAttemptPatchRaces(t *testing.T) {
 	for _, field := range []string{"resourceVersion", workerUIDCase, lifecycleGenerationCase, lifecycleAttemptCase} {
 		t.Run("status conflict/"+field, func(t *testing.T) {
 			f := newWorkerAttemptFixture(t)
-			f.patch = func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
+			f.patch = nativeTestAfterIntent(func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
 				live := f.storedMigration()
 				switch field {
 				case workerUIDCase:
@@ -577,9 +579,9 @@ func workerAttemptPatchRaces(t *testing.T) {
 					t.Fatal(err)
 				}
 				return c.Status().Patch(ctx, obj, p)
-			}
+			})
 			_, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy())
-			if !apierrors.IsConflict(err) || f.creates != 1 || f.patches != 1 || strings.Contains(err.Error(), workerAttemptCanary) {
+			if !apierrors.IsConflict(err) || f.creates != 1 || f.patches != 2 || strings.Contains(err.Error(), workerAttemptCanary) {
 				t.Fatal("native status race did not fail with a bounded sanitized conflict")
 			}
 			got := f.storedMigration()

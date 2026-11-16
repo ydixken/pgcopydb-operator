@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 var errNativeControlAdmission = errors.New("native control execution is not admitted")
@@ -108,11 +107,7 @@ func (r *MigrationReconciler) nativeControlFacts(ctx context.Context, m *v1beta1
 	if err != nil {
 		return nativeControlFacts{}, errNativeControlAdmission
 	}
-	expected, err := buildNativeWorkerJob(live, claim, r.RPGMigrateRunnerImage, live.Status.Attempts)
-	if err != nil || controllerutil.SetControllerReference(live, expected, r.Scheme) != nil {
-		return nativeControlFacts{}, errNativeControlAdmission
-	}
-	if r.APIReader.Get(ctx, client.ObjectKeyFromObject(worker), job) != nil || job.UID != worker.UID || job.Generation != worker.Generation || !apiequality.Semantic.DeepEqual(job.Spec, worker.Spec) || !nativePreflightJobMatches(expected, job) || !nativeControlJobRunning(job) {
+	if r.APIReader.Get(ctx, client.ObjectKeyFromObject(worker), job) != nil || job.UID != worker.UID || job.Generation != worker.Generation || !apiequality.Semantic.DeepEqual(job.Spec, worker.Spec) || !nativeWorkerAdmitted(live, job) || !nativeControlJobRunning(job) {
 		return nativeControlFacts{}, errNativeControlAdmission
 	}
 	pod, err := r.nativePreflightPod(ctx, job)
@@ -120,7 +115,8 @@ func (r *MigrationReconciler) nativeControlFacts(ctx context.Context, m *v1beta1
 		return nativeControlFacts{}, errNativeControlAdmission
 	}
 	template := podexec.NativeTemplateSHA256(job.Spec.Template)
-	references, err := nativeWorkerConnectionReferenceSHA256(expected)
+	// The admitted live Job, not a rebuild from the current spec, carries the worker's references.
+	references, err := nativeWorkerConnectionReferenceSHA256(job)
 	if err != nil || template == ([32]byte{}) || references == ([32]byte{}) {
 		return nativeControlFacts{}, errNativeControlAdmission
 	}

@@ -11,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // NativeStopRequester supplies request data only, never terminal execution authority.
@@ -37,13 +36,9 @@ func (r *MigrationReconciler) nativeStopCurrent(ctx context.Context, m *v1beta1.
 	if err != nil || !native.NativeReceiptsMatch(live, worker.UID, claim.UID) || worker.Name != live.Status.JobName || worker.Namespace != live.Namespace {
 		return nativeStopFacts{}, errNativeRetainedStop
 	}
-	expected, err := buildNativeWorkerJob(live, claim, r.RPGMigrateRunnerImage, live.Status.Attempts)
-	if err != nil || controllerutil.SetControllerReference(live, expected, r.Scheme) != nil {
-		return nativeStopFacts{}, errNativeRetainedStop
-	}
 	current := &batchv1.Job{}
 	if r.APIReader.Get(ctx, client.ObjectKeyFromObject(worker), current) != nil || ctx.Err() != nil || current.UID != worker.UID || current.Generation != worker.Generation ||
-		!native.NativeReceiptsMatch(live, current.UID, claim.UID) || !nativePreflightJobMatches(expected, current) || !nativePreflightJobMatches(worker, current) {
+		!native.NativeReceiptsMatch(live, current.UID, claim.UID) || !nativeWorkerAdmitted(live, current) || !nativePreflightJobMatches(worker, current) {
 		return nativeStopFacts{}, errNativeRetainedStop
 	}
 	pod, err := r.nativePreflightPod(ctx, current)

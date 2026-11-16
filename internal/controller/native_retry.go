@@ -15,12 +15,12 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 type nativeRetryAdmission struct {
@@ -35,15 +35,39 @@ type nativeRetryAdmission struct {
 
 // nativeRetryRouted reports whether a pass that is neither deleting nor suspended routes to the failed-worker retry.
 func nativeRetryRouted(worker *batchv1.Job) bool {
-	return worker != nil && nativeRecoveryWorkerFailed(worker)
+	return nativeRetryWorker(worker)
+}
+
+// nativeRetryWorker is the W the retry gate may follow: a failed admitted Job, or a recorded Job that is gone.
+func nativeRetryWorker(worker *batchv1.Job) bool {
+	return worker != nil && (nativeWorkerMissing(worker) || nativeRecoveryWorkerFailed(worker))
 }
 
 // reconcileNativeFailedWorker ends the Migration on a terminal worker failure, or else runs the retry gate.
 func (r *MigrationReconciler) reconcileNativeFailedWorker(ctx context.Context, live *v1beta1.Migration, current *batchv1.Job, claim *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
-	if terminal, err := r.reconcileNativeFailure(ctx, live, current, claim); terminal || err != nil {
+	terminal, err := r.reconcileNativeFailure(ctx, live, current, claim)
+	if busy, ok := errors.AsType[*nativeWorkerBusy](err); ok {
+		return r.holdNativeRetryBusy(ctx, live, busy)
+	}
+	if terminal || err != nil {
 		return ctrl.Result{}, err
 	}
 	return r.reconcileNativeRetry(ctx, live, live.DeepCopy(), current, claim)
+}
+
+// holdNativeRetryBusy is the retry wait of R1: RetryHeld=True WorkerPodRemains names the Job or pod.
+func (r *MigrationReconciler) holdNativeRetryBusy(ctx context.Context, live *v1beta1.Migration, busy *nativeWorkerBusy) (ctrl.Result, error) {
+	if r.Recorder == nil {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	desired := live.DeepCopy()
+	r.setHold(desired, reasonWorkerPodRemains, busy.message(live.Status.Attempts+1))
+	if !apiequality.Semantic.DeepEqual(desired.Status, live.Status) {
+		if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(live, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, nativeWorkerError(err)
+		}
+	}
+	return ctrl.Result{RequeueAfter: pollInterval}, nil
 }
 
 type nativeFailureReader interface {
@@ -54,7 +78,10 @@ func (r *MigrationReconciler) reconcileNativeFailure(ctx context.Context, m *v1b
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	live, original, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, nil)
-	if err != nil || !nativeRecoveryWorkerFailed(worker) || live.Status.NativeFinalizedJobUID != "" {
+	if errors.Is(err, errNativeRecoveryActive) {
+		return false, err
+	}
+	if err != nil || !nativeRetryWorker(worker) || live.Status.NativeFinalizedJobUID != "" {
 		return false, errNativeDisposition
 	}
 	if condition := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionFailed); condition != nil && condition.Status == metav1.ConditionTrue && live.Status.Phase == v1beta1.PhaseFailed && live.Status.ObservedGeneration == live.Generation {
@@ -64,7 +91,8 @@ func (r *MigrationReconciler) reconcileNativeFailure(ctx context.Context, m *v1b
 		}
 	}
 	reader, available := r.NativeJobs.(nativeFailureReader)
-	if !available {
+	if !available || nativePodless(original) {
+		// Without a pod there is no log to classify; the attempt fails ordinarily and the gate decides.
 		return false, nil
 	}
 	status := original.Status.ContainerStatuses[0]
@@ -121,14 +149,14 @@ func (r *MigrationReconciler) nativeRetryCurrent(ctx context.Context, expected *
 		return nil, nil, errNativeWorkerRetry
 	}
 	live, _, err := r.nativeRecoveryQuiescentCurrent(ctx, expected, a.worker, a.pvc, a.pod)
-	if err != nil || !nativeRecoveryWorkerFailed(a.worker) || r.nativeCompareClosureCurrent(ctx, live, a.closed) != nil {
+	if err != nil || !nativeRetryWorker(a.worker) || r.nativeCompareClosureCurrent(ctx, live, a.closed) != nil {
 		return nil, nil, errNativeWorkerRetry
 	}
 	return live, a.pvc, nil
 }
 
 func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
-	if !nativeRetryPolicyValid(m) || m.Spec.Suspend || !m.DeletionTimestamp.IsZero() || !nativeRecoveryWorkerFailed(worker) {
+	if !nativeRetryPolicyValid(m) || m.Spec.Suspend || !m.DeletionTimestamp.IsZero() || !nativeRetryWorker(worker) {
 		return ctrl.Result{}, errNativeWorkerRetry
 	}
 	live, original, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, nil)
@@ -140,13 +168,7 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 	}
 	if live.Status.RetryGate == nil {
 		desired := live.DeepCopy()
-		failedAt := jobFailedAt(worker)
-		if failedAt.IsZero() {
-			failedAt = r.currentTime()
-		}
-		desired.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: live.Status.Attempts, FailedAt: metav1.NewTime(failedAt), Failure: "Native worker failed"}
-		r.nativeCloneAttemptEnded(desired, reasonAttemptFailed)
-		r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, reasonGateProbing, "Native retry waits for fresh target authority")
+		r.recordNativeRetryGate(desired, worker)
 		return r.patchNativeRetry(ctx, m, desired, base)
 	}
 	rg := live.Status.RetryGate
@@ -222,6 +244,22 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 	}
 	a := &nativeRetryAdmission{migration: live.DeepCopy(), worker: worker.DeepCopy(), pvc: pvc.DeepCopy(), pod: original.DeepCopy(), readiness: readiness, closed: closed}
 	return r.startNativeRetry(ctx, live, live.DeepCopy(), a)
+}
+
+// recordNativeRetryGate opens the gate for the failed attempt; a vanished worker counts at once,
+// since no census binds it to a verdict.
+func (r *MigrationReconciler) recordNativeRetryGate(desired *v1beta1.Migration, worker *batchv1.Job) {
+	if nativeWorkerMissing(worker) {
+		r.countNativeAttempt(desired, "Native worker Job is gone")
+		return
+	}
+	failedAt := jobFailedAt(worker)
+	if failedAt.IsZero() {
+		failedAt = r.currentTime()
+	}
+	desired.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: desired.Status.Attempts, FailedAt: metav1.NewTime(failedAt), Failure: "Native worker failed"}
+	r.nativeCloneAttemptEnded(desired, reasonAttemptFailed)
+	r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, reasonGateProbing, "Native retry waits for fresh target authority")
 }
 
 // holdNativeRetryUnobserved paces a gate read without an observation at the gate interval.
@@ -321,14 +359,18 @@ func (r *MigrationReconciler) nativeRecoveryCurrent(ctx context.Context, expecte
 	if err != nil || expectedWorker.Name != live.Status.JobName || expectedWorker.Namespace != live.Namespace {
 		return nil, nil, nil, errNativeRecovery
 	}
-	canonical, err := buildNativeWorkerJob(live, pvc, r.RPGMigrateRunnerImage, live.Status.Attempts)
-	if err != nil || controllerutil.SetControllerReference(live, canonical, r.Scheme) != nil {
-		return nil, nil, nil, errNativeRecovery
-	}
 	worker := &batchv1.Job{}
-	if r.APIReader.Get(ctx, client.ObjectKeyFromObject(expectedWorker), worker) != nil || ctx.Err() != nil || worker.UID != expectedWorker.UID ||
-		!nativePreflightJobMatches(canonical, worker) || !nativePreflightJobMatches(expectedWorker, worker) ||
-		!apiequality.Semantic.DeepEqual(worker.Status, expectedWorker.Status) {
+	err = r.APIReader.Get(ctx, client.ObjectKeyFromObject(expectedWorker), worker)
+	if nativeWorkerMissing(expectedWorker) {
+		// A recorded worker that is gone stays gone: any Job under its name is another object.
+		if !apierrors.IsNotFound(err) || ctx.Err() != nil {
+			return nil, nil, nil, errNativeRecovery
+		}
+		return live, expectedWorker, pvc, nil
+	}
+	// The admission digest, not a rebuild from the current spec, binds the live worker (lifecycle 4).
+	if err != nil || ctx.Err() != nil || worker.UID != expectedWorker.UID || !nativeWorkerAdmitted(live, worker) ||
+		!nativePreflightJobMatches(expectedWorker, worker) || !apiequality.Semantic.DeepEqual(worker.Status, expectedWorker.Status) {
 		return nil, nil, nil, errNativeRecovery
 	}
 	return live, worker, pvc, nil
@@ -343,32 +385,41 @@ func (r *MigrationReconciler) nativeWorkerQuiescent(ctx context.Context, m *v1be
 	return err == nil, err
 }
 
+// nativeQuiescentWorker is the engine-free check for readers that need the worker's log: it refuses the pod-less anchor.
 func (r *MigrationReconciler) nativeQuiescentWorker(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (*corev1.Pod, error) {
+	pod, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
+	if err == nil && nativePodless(pod) {
+		return nil, errNativeRecovery
+	}
+	return pod, err
+}
+
+// nativeEngineFreeWorker is R1 for the recorded worker, observed twice: its terminal pod, or the pod-less anchor.
+func (r *MigrationReconciler) nativeEngineFreeWorker(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (*corev1.Pod, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	live, current, claim, err := r.nativeRecoveryCurrent(ctx, m, worker, pvc)
 	if err != nil {
 		return nil, errNativeRecovery
 	}
-	if current.Status.Terminating != nil && *current.Status.Terminating != 0 {
-		return nil, errNativeRecoveryActive
+	pod, err := r.nativeWorkerEngineFree(ctx, current)
+	if err != nil {
+		return nil, err
 	}
-	if !nativeEvidenceWorkerComplete(current) && !nativeRecoveryWorkerFailed(current) {
-		return nil, errNativeRecoveryActive
-	}
-	pod, err := r.nativePreflightPod(ctx, current)
-	if err != nil || pod == nil || !nativePreflightPodMatches(current, pod) ||
+	if !nativePodless(pod) && (!nativePreflightPodMatches(current, pod) ||
 		!nativeRecoveryPodTerminal(pod, runnerImageFor(live, r.RPGMigrateRunnerImage)) ||
 		nativeEvidenceWorkerComplete(current) && (pod.Status.Phase != corev1.PodSucceeded || pod.Status.ContainerStatuses[0].State.Terminated.ExitCode != 0 || pod.Status.ContainerStatuses[0].State.Terminated.Signal != 0) ||
-		nativeRecoveryWorkerFailed(current) && pod.Status.Phase != corev1.PodFailed {
+		nativeRecoveryWorkerFailed(current) && pod.Status.Phase != corev1.PodFailed) {
 		return nil, errNativeRecovery
 	}
 	if _, _, _, err := r.nativeRecoveryCurrent(ctx, live, current, claim); err != nil {
 		return nil, errNativeRecovery
 	}
-	confirmed, err := r.nativePreflightPod(ctx, current)
-	if err != nil || confirmed == nil || ctx.Err() != nil || !nativePreflightSamePod(pod, confirmed) ||
-		!apiequality.Semantic.DeepEqual(pod.Spec, confirmed.Spec) || !podexec.SamePodState(pod, confirmed, workerContainer) {
+	confirmed, err := r.nativeWorkerEngineFree(ctx, current)
+	if err != nil {
+		return nil, err
+	}
+	if ctx.Err() != nil || !nativeSameWorkerPod(pod, confirmed) {
 		return nil, errNativeRecovery
 	}
 	return confirmed, nil

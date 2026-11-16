@@ -52,6 +52,7 @@ func nativeFollowAckFixture(t *testing.T, laterBegin bool) (*lifecycleAPI, *Migr
 	s.worker.UID, s.worker.Generation = nativeFollowFlowWorkerUID, 1
 	s.extraPods = []corev1.Pod{*nativeRecoveryTestPod(s.worker, 0)}
 	s.migration.Status.NativeJobUID, s.migration.Status.NativePVCUID = string(s.worker.UID), string(s.pvc.UID)
+	s.migration.Status.NativeJobSHA256 = nativeTestDigest(t, s.worker)
 	var jobs *nativeFollowAckReader
 	if laterBegin {
 		certified, witness := nativeTerminalEarlierLSN, nativeTerminalLaterLSN
