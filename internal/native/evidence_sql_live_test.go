@@ -33,7 +33,7 @@ func TestNativeEvidenceSQLLive(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot read the test server's wal_level")
 	}
-	for _, method := range []string{"test_InventoryPublicationVerdicts", "test_ReceiptCatalogVerdicts", "test_InventoryLogicalSlotAndPublication", "test_RetryCensusCountsEngineSessions"} {
+	for _, method := range []string{"test_InventoryPublicationVerdicts", "test_InventoryGeneratedColumnMembers", "test_ReceiptCatalogVerdicts", "test_InventoryLogicalSlotAndPublication", "test_RetryCensusCountsEngineSessions"} {
 		t.Run(method, func(t *testing.T) {
 			if method == "test_InventoryLogicalSlotAndPublication" && strings.TrimSpace(string(level)) != "logical" {
 				// CI sets this so a misconfigured service fails instead of skipping the case unseen.
