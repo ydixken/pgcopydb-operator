@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -207,7 +208,7 @@ func TestNativePreflightMaterialization(t *testing.T) {
 					if !reflect.DeepEqual(env[:len(wantEnv)], wantEnv) {
 						t.Fatal("primary connection environment changed")
 					}
-					wantVolumes := append([]corev1.Volume{{Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(64*1024*1024, resource.BinarySI)}}}}, src.Volumes...)
+					wantVolumes := append([]corev1.Volume{{Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi"))}}}}, src.Volumes...)
 					wantVolumes = append(wantVolumes, tgt.Volumes...)
 					wantMounts := append([]corev1.VolumeMount{{Name: nativePreflightTmp, MountPath: "/tmp"}}, src.Mounts...)
 					wantMounts = append(wantMounts, tgt.Mounts...)

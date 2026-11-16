@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -228,7 +229,7 @@ func RetryMaterialization(m *v1beta1.Migration, w ExecutionData) ([]string, []st
 	}
 	env := slices.Clone(target.Env)
 	volumes := make([]corev1.Volume, 0, 2+len(target.Volumes))
-	volumes = append(volumes, corev1.Volume{Name: resourceKindWorkdir, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: w.PVCName, ReadOnly: true}}}, corev1.Volume{Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(64*1024*1024, resource.BinarySI)}}})
+	volumes = append(volumes, corev1.Volume{Name: resourceKindWorkdir, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: w.PVCName, ReadOnly: true}}}, corev1.Volume{Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi"))}}})
 	volumes = append(volumes, target.Volumes...)
 	mounts := make([]corev1.VolumeMount, 0, 2+len(target.Mounts))
 	mounts = append(mounts, corev1.VolumeMount{Name: resourceKindWorkdir, MountPath: "/work", ReadOnly: true}, corev1.VolumeMount{Name: nativePreflightTmp, MountPath: nativeRetryTmpPath})
