@@ -133,6 +133,7 @@ class FakeCommands:
         self.foreign_volume_user = False
         self.fail_volume_lookup = False
         self.fail_volume_remove = False
+        self.inspect_failures = {}
         self.config = {'apiVersion': 'v1', 'kind': 'Config', 'preferences': {}, 'current-context': ledger['context'],
                        'contexts': [{'name': ledger['context'], 'context': {'cluster': ledger['context'], 'user': ledger['context']}}],
                        'clusters': [{'name': ledger['context'], 'cluster': {'server': 'https://127.0.0.1:36443', 'certificate-authority-data': 'aW5lcnQtZml4dHVyZS1jYQ=='}}],
@@ -211,10 +212,15 @@ class FakeCommands:
         if args[:3] == ['podman', 'volume', 'ls']:
             if self.fail_volume_lookup:
                 raise MODULE.CommandError('CalledProcessError')
-            return json.dumps([{'Name': name} for name in self.volumes])
+            return json.dumps([{'Name': name, 'Labels': volume['Labels']} for name, volume in self.volumes.items()])
         if args[:3] == ['podman', 'volume', 'inspect']:
             if self.fail_volume_lookup:
                 raise MODULE.CommandError('CalledProcessError')
+            if args[-1] in self.inspect_failures:
+                vanish, error = self.inspect_failures[args[-1]]
+                if vanish:
+                    self.volumes.pop(args[-1])
+                raise error
             return json.dumps([self.volumes[args[-1]]])
         if args[:3] == ['podman', 'volume', 'rm']:
             if self.fail_volume_remove:
@@ -1115,6 +1121,58 @@ class LifecycleTests(GuardFixture):
             self.guard.down()
         self.assertIn(name, self.fake.volumes)
         self.assertEqual(self.guard.read()['phase'], 'cleaning')
+
+
+    def add_foreign_volume(self, labels):
+        name = 'e' * 64
+        self.fake.volumes[name] = {'Name': name, 'CreatedAt': '2026-11-08T11:00:00Z', 'Driver': 'local', 'Labels': labels}
+        return name
+
+
+    def test_unowned_volume_removed_between_list_and_inspect_is_absent(self):
+        self.configure_volume()
+        foreign = self.add_foreign_volume({'io.rpgmigrate.owner': 'another-run'})
+        self.fake.inspect_failures[foreign] = (True, MODULE.CommandError('CalledProcessError', 125))
+        self.guard.down()
+        self.assertEqual(self.guard.read()['phase'], 'down')
+        self.assertEqual(self.fake.volumes, {})
+        self.assertEqual({args[-1] for args, _, _ in self.fake.calls if args[:3] == ['podman', 'volume', 'rm']}, {'a' * 64})
+
+
+    def test_owned_volume_removed_between_list_and_inspect_refuses(self):
+        name = self.configure_volume()
+        node = self.ledger['nodes'][1]['name']
+        for vanished, labels in ((name, None), (name, {}), (self.add_foreign_volume({node: 'true'}), None)):
+            with self.subTest(vanished=vanished[0], labels=labels):
+                saved = copy.deepcopy(self.fake.volumes)
+                if labels is not None:
+                    self.fake.volumes[vanished]['Labels'] = labels
+                self.fake.inspect_failures = {vanished: (True, MODULE.CommandError('CalledProcessError', 125))}
+                with self.assertRaises(MODULE.CommandError):
+                    self.guard.down()
+                self.fake.volumes = saved
+                self.assertNotEqual(self.guard.read()['phase'], 'down')
+        self.assert_no_mutations()
+
+
+    def test_other_unowned_volume_inspection_failures_refuse(self):
+        self.configure_volume()
+        foreign = self.add_foreign_volume({'io.rpgmigrate.owner': 'another-run'})
+        for vanish, error in ((False, MODULE.CommandError('CalledProcessError', 125)), (True, MODULE.Cancelled())):
+            with self.subTest(vanish=vanish):
+                saved = copy.deepcopy(self.fake.volumes)
+                self.fake.inspect_failures = {foreign: (vanish, error)}
+                with self.assertRaises(MODULE.CommandError):
+                    self.guard.down()
+                self.fake.volumes = saved
+        self.assert_no_mutations()
+
+
+    def test_volume_listing_without_labels_refuses(self):
+        self.configure_volume()
+        self.add_foreign_volume(None)
+        with self.assertRaisesRegex(MODULE.Refusal, 'invalid volume listing identity'):
+            self.guard.volume_inventory(self.ledger)
 
 
     def test_partial_node_removal_retries_only_retained_owned_ids(self):
