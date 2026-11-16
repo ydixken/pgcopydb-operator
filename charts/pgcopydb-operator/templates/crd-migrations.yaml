@@ -2239,6 +2239,20 @@ spec:
                 description: nativeFinalizedJobUID records historical workflow finalization,
                   not replication completion authority.
                 type: string
+              nativeFreshAttempt:
+                description: nativeFreshAttempt is the native attempt that starts
+                  its state over (--restart); absent means attempt 1.
+                format: int32
+                minimum: 2
+                type: integer
+              nativeJobSHA256:
+                description: nativeJobSHA256 is the admission digest of the recorded
+                  native worker Job, written with its receipt.
+                maxLength: 64
+                type: string
+                x-kubernetes-validations:
+                - message: nativeJobSHA256 must be 64 lowercase hex characters
+                  rule: self.matches('^[0-9a-f]{64}$')
               nativeJobUID:
                 description: nativeJobUID binds native execution to the recorded worker
                   Job incarnation.
@@ -2247,6 +2261,14 @@ spec:
                 description: nativePVCUID binds native execution to the recorded work
                   PVC incarnation.
                 type: string
+              nativeReportJobUID:
+                description: nativeReportJobUID is the native worker Job whose completed-clone
+                  report was read and validated.
+                maxLength: 36
+                type: string
+                x-kubernetes-validations:
+                - message: nativeReportJobUID must be a lowercase UUID
+                  rule: self.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
               nativeRunnerImage:
                 description: nativeRunnerImage is the runner image admitted for a
                   native Migration; every later native Job runs it.
@@ -2258,6 +2280,16 @@ spec:
                 description: nativeSchemaJobUID pins the successfully created native
                   schema helper before capture or rejoin.
                 type: string
+              nativeWorkerIntent:
+                description: |-
+                  nativeWorkerIntent names the native worker the operator is about to create as attempt/nonce/digest:
+                  the attempt, a 16-byte hex nonce and the SHA-256 of the expected Job. Its receipt or its abandonment clears it.
+                maxLength: 108
+                type: string
+                x-kubernetes-validations:
+                - message: 'nativeWorkerIntent must be attempt/nonce/digest: a positive
+                    attempt, then 32 and 64 lowercase hex characters'
+                  rule: self.matches('^[1-9][0-9]{0,9}/[0-9a-f]{32}/[0-9a-f]{64}$')
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.
                 format: int64
@@ -4807,6 +4839,20 @@ spec:
                 description: nativeFinalizedJobUID records historical workflow finalization,
                   not replication completion authority.
                 type: string
+              nativeFreshAttempt:
+                description: nativeFreshAttempt is the native attempt that starts
+                  its state over (--restart); absent means attempt 1.
+                format: int32
+                minimum: 2
+                type: integer
+              nativeJobSHA256:
+                description: nativeJobSHA256 is the admission digest of the recorded
+                  native worker Job, written with its receipt.
+                maxLength: 64
+                type: string
+                x-kubernetes-validations:
+                - message: nativeJobSHA256 must be 64 lowercase hex characters
+                  rule: self.matches('^[0-9a-f]{64}$')
               nativeJobUID:
                 description: nativeJobUID binds native execution to the recorded worker
                   Job incarnation.
@@ -4815,6 +4861,14 @@ spec:
                 description: nativePVCUID binds native execution to the recorded work
                   PVC incarnation.
                 type: string
+              nativeReportJobUID:
+                description: nativeReportJobUID is the native worker Job whose completed-clone
+                  report was read and validated.
+                maxLength: 36
+                type: string
+                x-kubernetes-validations:
+                - message: nativeReportJobUID must be a lowercase UUID
+                  rule: self.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
               nativeRunnerImage:
                 description: nativeRunnerImage is the runner image admitted for a
                   native Migration; every later native Job runs it.
@@ -4826,6 +4880,16 @@ spec:
                 description: nativeSchemaJobUID pins the successfully created native
                   schema helper before capture or rejoin.
                 type: string
+              nativeWorkerIntent:
+                description: |-
+                  nativeWorkerIntent names the native worker the operator is about to create as attempt/nonce/digest:
+                  the attempt, a 16-byte hex nonce and the SHA-256 of the expected Job. Its receipt or its abandonment clears it.
+                maxLength: 108
+                type: string
+                x-kubernetes-validations:
+                - message: 'nativeWorkerIntent must be attempt/nonce/digest: a positive
+                    attempt, then 32 and 64 lowercase hex characters'
+                  rule: self.matches('^[1-9][0-9]{0,9}/[0-9a-f]{32}/[0-9a-f]{64}$')
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.
                 format: int64

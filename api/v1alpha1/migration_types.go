@@ -779,8 +779,8 @@ const (
 )
 
 // Condition type constants. Each is named for what True means: the first eight
-// are normal-true; ConditionFailed, ConditionCommitsBlocked and ConditionRetryHeld
-// are abnormal-true.
+// are normal-true; ConditionFailed, ConditionCommitsBlocked, ConditionRetryHeld,
+// ConditionBlocked and ConditionCleanupFailed are abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -793,6 +793,28 @@ const (
 	ConditionFailed           = "Failed"
 	ConditionCommitsBlocked   = "CommitsBlocked"
 	ConditionRetryHeld        = "RetryHeld"
+	// ConditionBlocked: a native action waits or refuses until something outside the operator changes.
+	ConditionBlocked = "Blocked"
+	// ConditionCleanupFailed: the finalizer was released without native cleanup.
+	ConditionCleanupFailed = "CleanupFailed"
+)
+
+// Reasons of ConditionBlocked. ReasonProceeding is its False reason.
+const (
+	ReasonWorkerPodRemains    = "WorkerPodRemains"
+	ReasonForegroundDeletion  = "ForegroundDeletion"
+	ReasonForeignObject       = "ForeignObject"
+	ReasonWorkerModified      = "WorkerModified"
+	ReasonCleanupUnavailable  = "CleanupUnavailable"
+	ReasonEvidenceUnavailable = "EvidenceUnavailable"
+	ReasonStatusIntegrity     = "StatusIntegrity"
+	ReasonProceeding          = "Proceeding"
+)
+
+// Reasons of ConditionCleanupFailed. ReasonWorkVolumeLost is also a ConditionFailed reason.
+const (
+	ReasonNamespaceTerminating = "NamespaceTerminating"
+	ReasonWorkVolumeLost       = "WorkVolumeLost"
 )
 
 // CloneProgress carries how far the base copy has got. While the copy runs
@@ -933,6 +955,30 @@ type MigrationStatus struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="nativeRunnerImage is immutable once recorded"
 	// +optional
 	NativeRunnerImage string `json:"nativeRunnerImage,omitempty"`
+
+	// nativeWorkerIntent names the native worker the operator is about to create as attempt/nonce/digest:
+	// the attempt, a 16-byte hex nonce and the SHA-256 of the expected Job. Its receipt or its abandonment clears it.
+	// +kubebuilder:validation:MaxLength=108
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[1-9][0-9]{0,9}/[0-9a-f]{32}/[0-9a-f]{64}$')",message="nativeWorkerIntent must be attempt/nonce/digest: a positive attempt, then 32 and 64 lowercase hex characters"
+	// +optional
+	NativeWorkerIntent string `json:"nativeWorkerIntent,omitempty"`
+
+	// nativeJobSHA256 is the admission digest of the recorded native worker Job, written with its receipt.
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[0-9a-f]{64}$')",message="nativeJobSHA256 must be 64 lowercase hex characters"
+	// +optional
+	NativeJobSHA256 string `json:"nativeJobSHA256,omitempty"`
+
+	// nativeReportJobUID is the native worker Job whose completed-clone report was read and validated.
+	// +kubebuilder:validation:MaxLength=36
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')",message="nativeReportJobUID must be a lowercase UUID"
+	// +optional
+	NativeReportJobUID string `json:"nativeReportJobUID,omitempty"`
+
+	// nativeFreshAttempt is the native attempt that starts its state over (--restart); absent means attempt 1.
+	// +kubebuilder:validation:Minimum=2
+	// +optional
+	NativeFreshAttempt int32 `json:"nativeFreshAttempt,omitempty"`
 
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
