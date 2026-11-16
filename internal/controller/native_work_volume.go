@@ -3,13 +3,19 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -57,6 +63,41 @@ func (r *MigrationReconciler) deleteNativeWorkClaim(ctx context.Context, m *v1be
 		return errNativeDisposition
 	}
 	return nil
+}
+
+// failNativeWorkVolumeLost is the V table's retry and finish cells past attempt 0 (decision di): W is
+// stopped first, and only an engine-free W lets Failed=WorkVolumeLost be written (R1). A lost claim
+// binds no TERM, so the stop is the drop, whose pod deletion sends SIGTERM.
+func (r *MigrationReconciler) failNativeWorkVolumeLost(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job) (bool, ctrl.Result, error) {
+	if r.Recorder == nil {
+		return true, ctrl.Result{}, errNativeReconcile
+	}
+	if !nativeWorkerMissing(worker) && !nativeWorkerEnded(worker) {
+		done, err := r.dropNativeWorker(ctx, m, worker)
+		if err != nil {
+			return true, ctrl.Result{}, err
+		}
+		if !done {
+			return true, ctrl.Result{RequeueAfter: pollInterval}, nil
+		}
+		return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
+	if _, err := r.nativeWorkerEngineFree(ctx, worker); err != nil {
+		return r.holdNativeBusy(ctx, m, base, err)
+	}
+	msg := fmt.Sprintf("Work PVC %s is missing, deleting or replaced, so the native state of attempt %d is lost; delete the Migration, which releases it with CleanupFailed", workPVCName(m), m.Status.Attempts)
+	desired := m.DeepCopy()
+	desired.Status.ObservedGeneration = desired.Generation
+	r.nativeCloneAttemptEnded(desired, reasonCloneFailed)
+	r.fail(desired, v1beta1.ReasonWorkVolumeLost, "Fail", msg)
+	r.setCondition(desired, v1beta1.ConditionComplete, metav1.ConditionFalse, v1beta1.ReasonWorkVolumeLost, "Native worker did not complete")
+	r.clearNativeBlocked(desired)
+	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return true, ctrl.Result{}, nativeWorkerError(err)
+	}
+	desired.DeepCopyInto(m)
+	metrics.Record(desired)
+	return true, ctrl.Result{}, nil
 }
 
 // disposeNativeWorkClaim deletes the recorded work PVC of a finalized follow Migration.

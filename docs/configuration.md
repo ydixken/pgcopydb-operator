@@ -192,6 +192,8 @@ The [CRD reference](reference/api.md) lists the sections.
 
 `spec.workVolume` sizes the PersistentVolumeClaim that holds pgcopydb's dumps and catalogs.
 Retries resume from it, except when a live migration's retry [starts over](operations/lifecycle.md#retries-and-resume).
+With `spec.engine: rpgmigrate`, the engine keeps its state on the volume.
+So a work PVC that goes after the first attempt started ends the Migration as [`WorkVolumeLost`](troubleshooting.md#phase-failed-with-reason-workvolumelost).
 
 ```yaml
 spec:

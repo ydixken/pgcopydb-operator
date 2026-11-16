@@ -170,6 +170,11 @@ The operator owns the retry policy, so the Migration holds the attempt counts an
   A failed worker whose pod is gone retries like one whose pod remains, but without a log to classify the failure.
   A native worker Job that is `Complete` but whose pod went before the operator read its report also counts as a failed attempt.
   The operator finishes a native attempt only from that report, or from the receipt it records once it has read it.
+- With `spec.engine: rpgmigrate`, a work PVC that is missing, deleting, or replaced after the first attempt started ends the Migration as `WorkVolumeLost`.
+  The engine keeps its state on that volume, so no attempt can resume it.
+  The operator first deletes a worker that still runs, in the foreground, and sets `Failed` only after no engine of that worker can run.
+  The slot of a live migration stays on the source until the deletion of the Migration.
+  That deletion cannot run native cleanup without the volume, so it releases the Migration with `CleanupFailed`.
 - A deleted pod whose network went with it is an example of a runner lost without closing its connections.
   Such a runner can leave target sessions open with their table locks.
   The [retry gate](#the-retry-gate) holds the next attempt until those sessions are gone, so the attempt does not start behind them.

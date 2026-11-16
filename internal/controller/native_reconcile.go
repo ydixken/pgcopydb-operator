@@ -415,7 +415,7 @@ func (r *MigrationReconciler) reconcileNativeWorkerState(ctx context.Context, m,
 			return r.holdNative(ctx, m, base, v1beta1.ReasonForeignObject, fmt.Sprintf(
 				"PVC %s is not a live work volume of this Migration (foreign, replaced or deleting); the operator neither uses nor removes it", workPVCName(m)))
 		}
-		return true, ctrl.Result{}, errNativeReconcile
+		return r.failNativeWorkVolumeLost(ctx, m, base, s.worker)
 	}
 	return r.reconcileNativeLiveWorker(ctx, m, base, s)
 }

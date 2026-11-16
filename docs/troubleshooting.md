@@ -58,6 +58,7 @@ When the pod is already gone, the condition carries only the Job message.
 | [Phase `Failed`, reason `DiskFull`, after one attempt](#phase-failed-with-reason-diskfull) | Workers and cluster objects |
 | [Phase `Failed`, reason `SchemaDrift`, after one attempt](#phase-failed-with-reason-schemadrift) | Workers and cluster objects |
 | [Phase `Failed`, reason `SnapshotLost`](#phase-failed-with-reason-snapshotlost) | Workers and cluster objects |
+| [Phase `Failed`, reason `WorkVolumeLost`](#phase-failed-with-reason-workvolumelost) | Workers and cluster objects |
 | [Status and metrics lag behind the worker](#status-updates-lag-behind-the-worker) | Workers and cluster objects |
 | [Scrapes return 401](#scrapes-return-401) | Metrics and dashboards |
 | [Scrapes return 403](#scrapes-return-403) | Metrics and dashboards |
@@ -1033,6 +1034,20 @@ In the other order, that slot and origin would then belong to the new Migration.
 With `dropIfExists: true`, the operator starts over on its own and emits a `SnapshotLost` warning event.
 That attempt runs `pgcopydb stream cleanup` to drop the slot, the automatic publication, and the target origin.
 Then it runs `pgcopydb clone --follow --restart --drop-if-exists`.
+
+### Phase `Failed` with reason `WorkVolumeLost`
+
+With `spec.engine: rpgmigrate`, phase `Failed` with reason `WorkVolumeLost` means that the work PVC went after the first attempt started.
+The PVC is missing, deleting, or replaced by a claim with another UID.
+The engine kept its state on that volume, so no attempt can resume the copy.
+Before it set the condition, the operator deleted the worker if it still ran.
+The message names the PVC.
+
+A live migration keeps its replication slot, and the slot keeps WAL on the source.
+Delete the Migration soon.
+Without the volume, the deletion cannot run native cleanup, so it releases the Migration with `CleanupFailed` reason `WorkVolumeLost`.
+Then drop the slots and publications of the run, as [`CleanupFailed` is True](#cleanupfailed-is-true) shows.
+A claim with another UID stays in place, because the operator never deletes a claim that it did not record.
 
 ### Status updates lag behind the worker
 
