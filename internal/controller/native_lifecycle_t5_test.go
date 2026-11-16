@@ -495,3 +495,152 @@ func TestNativeStartedWithoutStateIsTerminal(t *testing.T) {
 		t.Fatalf("state-missing classified as %q terminal=%v", reason, terminal)
 	}
 }
+
+// t5SetSynchronousCommit edits spec.target.synchronousCommit of a stored Migration after admission.
+func t5SetSynchronousCommit(t *testing.T, store client.Client, m *v1beta1.Migration, value string) {
+	t.Helper()
+	m.Spec.Target.SynchronousCommit = value
+	m.Generation++
+	if err := store.Update(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func t5SynchronousCommitHeld(t *testing.T, m *v1beta1.Migration, action string) {
+	t.Helper()
+	b := t5Blocked(m)
+	if b == nil || b.Reason != v1beta1.ReasonSynchronousCommitUnsupported || !strings.Contains(b.Message, "spec.target.synchronousCommit") || !strings.Contains(b.Message, action) {
+		t.Fatalf("no SynchronousCommitUnsupported hold naming the field and %s: %+v", action, b)
+	}
+}
+
+// dk: a target.synchronousCommit edit after admission holds every path that needs a native helper Job or
+// a new attempt with Blocked=SynchronousCommitUnsupported, without a bare error and without a rewrite on
+// later passes; unsetting the field lets the path go on. Suspend, the running attempt, a finish without a
+// helper and a release without cleanup are unchanged (the controls below).
+
+func TestNativeSynchronousCommitEditHoldsRetry(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	t5SetSynchronousCommit(t, f.store, f.current(), v1beta1.SynchronousCommitLocal)
+	patches := 0
+	for pass := range 4 {
+		if _, err := f.dispatch(t); err != nil {
+			t.Fatalf("retry pass %d: %v", pass, err)
+		}
+		if pass == 1 {
+			patches = f.patches
+		}
+	}
+	t5SynchronousCommitHeld(t, f.current(), "retry gate of attempt 2")
+	// The gate still records the failed attempt, which needs no native Job (nothing else changes).
+	if rg, held := f.current().Status.RetryGate, meta.FindStatusCondition(f.current().Status.Conditions, v1beta1.ConditionRetryHeld); rg == nil || rg.FailedAttempt != 1 || held == nil || held.Reason != reasonGateProbing {
+		t.Fatalf("held retry lost the gate record: gate=%+v held=%+v", rg, held)
+	}
+	if f.patches != patches || f.retryHelpers != 0 || f.workerCreates != 0 || f.current().Status.Phase == v1beta1.PhaseFailed {
+		t.Fatalf("held retry acted: patches=%d helpers=%d creates=%d phase=%s", f.patches-patches, f.retryHelpers, f.workerCreates, f.current().Status.Phase)
+	}
+	t5SetSynchronousCommit(t, f.store, f.current(), "")
+	for pass := 0; pass < 6 && f.current().Status.Attempts < 2; pass++ {
+		if _, err := f.dispatch(t); err != nil {
+			t.Fatalf("pass %d after the field was unset: %v", pass, err)
+		}
+	}
+	if got := f.current(); got.Status.Attempts != 2 || f.workerCreates != 1 || t5Blocked(got) != nil {
+		t.Fatalf("unset field did not release the retry: attempts=%d creates=%d blocked=%+v", got.Status.Attempts, f.workerCreates, t5Blocked(got))
+	}
+}
+
+func TestNativeSynchronousCommitEditHoldsFollowFinish(t *testing.T) {
+	// No verification: every follow finish reads its completion evidence through native helper Jobs.
+	f := newNativeFinishFixture(t)
+	t5SetSynchronousCommit(t, f.store, f.current(), v1beta1.SynchronousCommitLocal)
+	for pass := range 3 {
+		if _, err := nativeDispatch(t, f.r, f.current()); err != nil {
+			t.Fatalf("finish pass %d: %v", pass, err)
+		}
+		if f.patches != 1 || len(f.created) != 0 {
+			t.Fatalf("finish pass %d: patches=%d created=%v", pass, f.patches, f.created)
+		}
+	}
+	t5SynchronousCommitHeld(t, f.current(), "native finish")
+	t5SetSynchronousCommit(t, f.store, f.current(), "")
+	for range 2 {
+		if _, err := nativeDispatch(t, f.r, f.current()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if t5Blocked(f.current()) != nil || len(f.created) == 0 {
+		t.Fatalf("unset field did not release the finish: blocked=%+v created=%v", t5Blocked(f.current()), f.created)
+	}
+}
+
+func TestNativeSynchronousCommitEditHoldsCloneCompare(t *testing.T) {
+	f := newNativeCloneFixture(t, false, &v1beta1.VerificationOptions{Schema: true})
+	created := 0
+	f.onCreate = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		created++
+		return c.Create(ctx, obj, opts...)
+	}
+	t5SetSynchronousCommit(t, f.store, f.current(), v1beta1.SynchronousCommitLocal)
+	for pass := range 3 {
+		if _, err := nativeDispatch(t, f.r, f.current()); err != nil {
+			t.Fatalf("clone pass %d: %v", pass, err)
+		}
+	}
+	t5SynchronousCommitHeld(t, f.current(), "native finish")
+	if created != 0 || f.patches != 1 || f.current().Status.Phase == v1beta1.PhaseCompleted {
+		t.Fatalf("held clone acted: created=%d patches=%d phase=%s", created, f.patches, f.current().Status.Phase)
+	}
+}
+
+func TestNativeSynchronousCommitEditCloneWithoutCompareCompletes(t *testing.T) {
+	f := newNativeCloneFixture(t, false, nil)
+	t5SetSynchronousCommit(t, f.store, f.current(), v1beta1.SynchronousCommitLocal)
+	f.m = f.current()
+	if _, err := nativeCloneFinish(t, f); err != nil || f.current().Status.Phase != v1beta1.PhaseCompleted || t5Blocked(f.current()) != nil {
+		t.Fatalf("a finish that needs no helper did not complete: err=%v phase=%s blocked=%+v", err, f.current().Status.Phase, t5Blocked(f.current()))
+	}
+}
+
+func TestNativeSynchronousCommitEditHoldsDeletionCleanup(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	w := t4Wrap(t, f)
+	t5SetSynchronousCommit(t, f.store, f.current(), v1beta1.SynchronousCommitLocal)
+	t4Delete(t, f)
+	for pass := range 3 {
+		if _, err := f.dispatch(t); err != nil {
+			t.Fatalf("deletion pass %d: %v", pass, err)
+		}
+	}
+	t5SynchronousCommitHeld(t, f.current(), "native cleanup")
+	if f.cleanupCalled || t4Released(f) || w.failed != nil {
+		t.Fatalf("held deletion acted: cleanup=%v released=%v condition=%+v", f.cleanupCalled, t4Released(f), w.failed)
+	}
+	t5SetSynchronousCommit(t, f.store, f.current(), "")
+	if err := t4Passes(t, f, 3); err != nil || !f.cleanupCalled || !t4Released(f) {
+		t.Fatalf("unset field did not release the deletion: err=%v cleanup=%v released=%v", err, f.cleanupCalled, t4Released(f))
+	}
+}
+
+func TestNativeSynchronousCommitEditLostClaimDeletionReleases(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	w := t4Wrap(t, f)
+	t5SetSynchronousCommit(t, f.store, f.current(), v1beta1.SynchronousCommitLocal)
+	t4RemoveWorker(t, f)
+	t5LoseClaim(t, f, t5ClaimGone)
+	t4Delete(t, f)
+	if err := t4Passes(t, f, 2); err != nil || f.cleanupCalled {
+		t.Fatalf("lost claim deletion: err=%v cleanup=%v", err, f.cleanupCalled)
+	}
+	t4CleanupFailedReleased(t, f, w, v1beta1.ReasonWorkVolumeLost)
+}
+
+func TestNativeSynchronousCommitEditSuspends(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	m := f.current()
+	m.Spec.Suspend = true
+	t5SetSynchronousCommit(t, f.store, m, v1beta1.SynchronousCommitLocal)
+	if _, err := f.dispatch(t); err != nil || f.current().Status.Phase != v1beta1.PhaseSuspended || t5Blocked(f.current()) != nil {
+		t.Fatalf("suspend with the field set: err=%v phase=%s blocked=%+v", err, f.current().Status.Phase, t5Blocked(f.current()))
+	}
+}

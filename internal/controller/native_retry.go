@@ -188,6 +188,10 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 		r.failNativeRetryBudget(desired)
 		return r.patchNativeRetry(ctx, m, desired, base)
 	}
+	if nativeSynchronousCommitEdited(live) {
+		_, result, err := r.holdNativeSynchronousCommit(ctx, m, base, fmt.Sprintf("the retry gate of attempt %d", live.Status.Attempts+1))
+		return result, err
+	}
 	now := r.currentTime()
 	if last := rg.LastReadAt; last != nil && !last.After(now) {
 		// The stamp keeps whole seconds, so one more second keeps two reads a full interval apart.

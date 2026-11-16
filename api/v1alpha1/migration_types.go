@@ -812,7 +812,9 @@ const (
 	ReasonEvidenceUnavailable = "EvidenceUnavailable"
 	ReasonStatusIntegrity     = "StatusIntegrity"
 	ReasonCompareFailed       = "CompareFailed"
-	ReasonProceeding          = "Proceeding"
+	// ReasonSynchronousCommitUnsupported: spec.target.synchronousCommit was set after native admission.
+	ReasonSynchronousCommitUnsupported = "SynchronousCommitUnsupported"
+	ReasonProceeding                   = "Proceeding"
 )
 
 // Reasons of ConditionCleanupFailed. ReasonWorkVolumeLost is also a ConditionFailed reason.

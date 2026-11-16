@@ -248,7 +248,15 @@ func (r *MigrationReconciler) reconcileNativeFinishEntry(ctx context.Context, m,
 	if handled, result, err := r.reconcileNativeCloneReport(ctx, m, base, worker, pvc, original); handled {
 		return handled, result, err
 	}
-	return r.reconcileNativeCompares(ctx, m, base, worker, pvc)
+	if handled, result, err := r.reconcileNativeCompares(ctx, m, base, worker, pvc); handled {
+		return handled, result, err
+	}
+	// dk: the rest of a follow finish reads evidence through native helper Jobs, and a clone finish creates its
+	// compares; the edit changed the generation, so no compare pinned before it is read again (C table, drifted).
+	if nativeSynchronousCommitEdited(m) && (followEnabled(m) || verificationRequested(m)) {
+		return r.holdNativeSynchronousCommit(ctx, m, base, "the native finish")
+	}
+	return false, ctrl.Result{}, nil
 }
 
 // reconcileNativeCompares is the finish column of the C table, run before any helper Job of the pass.
@@ -266,7 +274,7 @@ func (r *MigrationReconciler) reconcileNativeCompares(ctx context.Context, m, ba
 		}
 	}
 	// The worker table leaves an EvidenceUnavailable hold to this path, which clears it once it proceeds.
-	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionBlocked) {
+	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionBlocked) && !nativeSynchronousCommitHeld(m) {
 		desired := m.DeepCopy()
 		r.clearNativeBlocked(desired)
 		return r.patchNativeWorkerState(ctx, m, base, desired)

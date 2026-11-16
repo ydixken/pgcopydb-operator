@@ -31,6 +31,8 @@ Once the record exists, the API server rejects any write that changes or removes
 With `spec.engine: rpgmigrate`, each attempt keeps the worker Job admitted when the operator created it.
 The receipt of the attempt records that Job's admission digest in `status.nativeJobSHA256`, and later passes check the live Job against the digest, not against a Job rebuilt from the current spec.
 A change to `spec.runner` (resources, node selector, tolerations, affinity), to `spec.clone`, or to the Migration's labels and annotations therefore applies from the next attempt, and the running attempt continues.
+The compare Job includes the generation of the Migration.
+So a spec change during a running compare Job deletes that Job, and a later pass starts the compare again.
 
 Before it creates a worker, the operator records `status.nativeWorkerIntent`: the attempt, a random nonce, and the digest of the Job it is about to create.
 The Job carries the same attempt and nonce in its annotation `pgcopydb-operator.io/native-worker-intent`.
@@ -448,7 +450,9 @@ So an apply commit lost in a target failover would lose those changes for good.
 A change applies from the next attempt, because a running worker keeps the URI it started with.
 
 With `spec.engine: rpgmigrate`, admission refuses `synchronousCommit` on either endpoint, and the Migration fails with reason `InvalidSpec`.
-Setting it on an admitted native Migration keeps the running attempt, but the operator refuses to start any later attempt until you unset it.
+Setting it on an admitted native Migration keeps the running attempt.
+A retry, a finish, or the cleanup of a deletion runs native Jobs, and those do not qualify the field.
+So each of them waits with `Blocked=True` and reason `SynchronousCommitUnsupported` until you unset the field.
 
 Admission rejects the field on the source.
 It also rejects the field together with `uriSecretRef`, because the operator never reads that Secret and cannot add the option to it.

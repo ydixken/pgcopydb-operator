@@ -204,6 +204,9 @@ func (r *MigrationReconciler) reconcileNativeRetainedDisposition(ctx context.Con
 	if _, held, err := r.disposeNativeCompareHelpers(ctx, live, claim, false); held != nil || err != nil {
 		return r.holdNativeCompare(ctx, live, live.DeepCopy(), held, err)
 	}
+	if nativeSynchronousCommitEdited(live) {
+		return r.holdNativeSynchronousCommit(ctx, live, live.DeepCopy(), "native cleanup")
+	}
 	if err := r.cleanupNativeDeletion(ctx, live, current, claim, original); err != nil {
 		return r.holdNativeCleanupUnavailable(ctx, live, err)
 	}
