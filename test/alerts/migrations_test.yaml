@@ -240,11 +240,102 @@ tests:
               severity: critical
             exp_annotations:
               summary: >-
-                Migration default/bad has not reached endpos 15m into cutover
+                Migration default/bad stopped short of endpos for 15m in cutover
               description: >-
-                Cutover set an endpos but the target has not replayed up to
-                it, so the migration cannot complete. Check the worker logs
-                and the target's apply rate.
+                Cutover set an endpos, and the replay position has stayed below
+                it without moving, so the migration cannot complete. Check the
+                worker logs and the target's apply rate.
+
+  # Native drains, shaped on M7-RUN6 runs 02 and 09. After the worker exits,
+  # native replay keeps its last sample (56 bytes short of endpos in run 02)
+  # until CuttingOver ends, and CutoverCompleted waits for Completed. "long"
+  # and "drained" (12m drain, 6m frozen handover) stay quiet. "stalled" is run
+  # 09's blocked apply; "late" stops moving at 11m, so it fires 5m later.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="long", phase="CuttingOver"}'
+        values: "1x60"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="long"}'
+        values: "1000000000x60"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="long"}'
+        values: "0+20000000x60"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="drained", phase="CuttingOver"}'
+        values: "1x18"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="drained", phase="Verifying"}'
+        values: "_x18 1x40"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="drained"}'
+        values: "172720808x60"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="drained"}'
+        values: "172000000+60000x11 172720752x48"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="stalled", phase="CuttingOver"}'
+        values: "1x60"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="stalled"}'
+        values: "173343136x60"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="stalled"}'
+        values: "172777440x60"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="late", phase="CuttingOver"}'
+        values: "1x60"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="late"}'
+        values: "5000x60"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="late"}'
+        values: "100+100x10 1200x49"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PgcopydbMigrationCutoverStalled
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: PgcopydbMigrationCutoverStalled
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: stalled
+              severity: critical
+            exp_annotations:
+              summary: >-
+                Migration default/stalled stopped short of endpos for 15m in cutover
+              description: >-
+                Cutover set an endpos, and the replay position has stayed below
+                it without moving, so the migration cannot complete. Check the
+                worker logs and the target's apply rate.
+      - eval_time: 29m
+        alertname: PgcopydbMigrationCutoverStalled
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: stalled
+              severity: critical
+            exp_annotations:
+              summary: >-
+                Migration default/stalled stopped short of endpos for 15m in cutover
+              description: >-
+                Cutover set an endpos, and the replay position has stayed below
+                it without moving, so the migration cannot complete. Check the
+                worker logs and the target's apply rate.
+      - eval_time: 32m
+        alertname: PgcopydbMigrationCutoverStalled
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: stalled
+              severity: critical
+            exp_annotations:
+              summary: >-
+                Migration default/stalled stopped short of endpos for 15m in cutover
+              description: >-
+                Cutover set an endpos, and the replay position has stayed below
+                it without moving, so the migration cannot complete. Check the
+                worker logs and the target's apply rate.
+          - exp_labels:
+              namespace: default
+              name: late
+              severity: critical
+            exp_annotations:
+              summary: >-
+                Migration default/late stopped short of endpos for 15m in cutover
+              description: >-
+                Cutover set an endpos, and the replay position has stayed below
+                it without moving, so the migration cannot complete. Check the
+                worker logs and the target's apply rate.
 
   # Commits blocked for over 15m fire, and at 14m the alert is still pending.
   # "clear" carries both conditions with status False only, which never fires.

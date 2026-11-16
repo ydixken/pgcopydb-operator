@@ -237,7 +237,7 @@ That sample reads the source WAL insert position and the native slot's `confirme
 `write_lsn_bytes` and `source_lsn_bytes` are both that insert position, so receive lag reads zero and means nothing here.
 `replay_lsn_bytes` is that `confirmed_flush_lsn`, and `replication_lag_bytes` is exactly `write - replay`.
 See [What the positions mean with engine `rpgmigrate`](live-migration.md#what-the-positions-mean-with-engine-rpgmigrate) for why replay is not proof of target application.
-With replay present, `PgcopydbMigrationCutoverStalled` also covers a native drain that does not bring `confirmed_flush_lsn` to endpos.
+With replay present, `PgcopydbMigrationCutoverStalled` also covers a native drain whose `confirmed_flush_lsn` stops short of endpos.
 A sample that is unknown deletes all four series, never sets them to zero.
 The four series also disappear outside the sampling phases and when the sampler stops.
 
@@ -457,7 +457,7 @@ The promtool unit tests under `test/alerts/` pin each one, so when you tune a va
 | `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h |
 | `PgcopydbMigrationCommitsBlocked` | warning | `CommitsBlocked` or `RetryHeld` is True for 15m while active |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending` |
-| `PgcopydbMigrationCutoverStalled` | critical | The endpos is not reached for 15m in `CuttingOver` |
+| `PgcopydbMigrationCutoverStalled` | critical | Replay stops short of the endpos for 15m in `CuttingOver` |
 
 `PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail reads as `Finalizing`.
 That tail can keep the target size flat while nothing stalls.
@@ -471,6 +471,11 @@ During the base copy, the lag gauge already exists, a large lag is normal, and n
 After the worker exits, the replay gauge keeps its last sample, which can be below the endpos.
 The phase stays `CuttingOver` through the drain verification, the ownership handover, and the cleanup.
 Without these two limits, a complete drain can fire the alert.
+With engine `rpgmigrate`, `CutoverCompleted` turns `True` only at `Completed`, so the frozen gap stands for the rest of `CuttingOver`.
+The rule therefore fires only while the replay gauge has not moved for the last 5 minutes.
+A drain that keeps moving never fires, however long its backlog takes.
+A drain that stops fires within 20 minutes of its last move, and never before 15 minutes of `CuttingOver`.
+A single source transaction that takes longer than that to apply can fire it, because the slot position moves only at a commit.
 
 No alert covers slot retention.
 While a follow migration is suspended, failed, or streaming, its replication slot keeps WAL on the **source**.
