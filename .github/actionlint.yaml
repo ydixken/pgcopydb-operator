@@ -4,5 +4,6 @@ self-hosted-runner:
   labels:
     - github-runner-pgcopydb-operator
     - github-runner-pgcopydb-e2e
+    - github-runner-rpgmigrate-native
     - ubuntu-26.04
     - ubuntu-26.04-arm
