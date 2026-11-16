@@ -12,8 +12,9 @@ set -euo pipefail
 # in the Job spec alone and the stages can also be run by hand from here.
 cd "$(dirname "$0")"
 
-# legacy.sql holds what the native engine refuses, so only the pgcopydb engine
-# seeds it. An unknown engine stops here rather than seeding the wrong shape.
+# legacy.sql holds what the native fixture leaves out, so only the pgcopydb
+# engine seeds it; the native-widening spec applies it to a native source itself.
+# An unknown engine stops here rather than seeding the wrong shape.
 case "${SEED_ENGINE:-}" in
     pgcopydb) legacy=on ;;
     rpgmigrate) legacy=off ;;
