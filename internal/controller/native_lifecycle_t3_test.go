@@ -287,6 +287,7 @@ func TestNativeLostCompareReceiptRecovers(t *testing.T) {
 const (
 	t3RowNotOwned    = "not owned"
 	t3RowTerminating = "terminating"
+	t3Controlled     = "controlled"
 )
 
 // t3CompareRow puts the schema compare of f into one state of the C table.
@@ -494,6 +495,34 @@ func TestNativeHelperJobEventsDropped(t *testing.T) {
 		if got := ownedJobEvents.Update(event.UpdateEvent{ObjectOld: job, ObjectNew: job}); got != delivered {
 			t.Errorf("%s update: delivered=%v, want %v", name, got, delivered)
 		}
+	}
+}
+
+// nativeEvidenceMigration binds the work claim through nativeWorkIdentity, so it admits exactly the
+// claims that rule admits.
+func TestNativeEvidenceMigrationBindsClaimThroughWorkIdentity(t *testing.T) {
+	for _, variant := range []string{t3Controlled, "other Migration UID", "no owner reference", "owner not controller", "other kind"} {
+		t.Run(variant, func(t *testing.T) {
+			f := newNativeFinishFixture(t)
+			pvc := f.pvc.DeepCopy()
+			owner := &pvc.OwnerReferences[0]
+			switch variant {
+			case "other Migration UID":
+				owner.UID = "another-migration"
+			case "no owner reference":
+				pvc.OwnerReferences = nil
+			case "owner not controller":
+				owner.Controller = nil
+			case "other kind":
+				owner.Kind = "ConfigMap"
+			}
+			f.replace(pvc)
+			_, identityErr := nativeWorkIdentity(f.m, pvc)
+			_, err := f.r.nativeEvidenceMigration(context.Background(), f.m, f.worker, pvc)
+			if (err == nil) != (identityErr == nil) || variant == t3Controlled && err != nil || variant != t3Controlled && err == nil {
+				t.Fatalf("evidence claim binding diverged from nativeWorkIdentity: evidence=%v identity=%v", err, identityErr)
+			}
+		})
 	}
 }
 
