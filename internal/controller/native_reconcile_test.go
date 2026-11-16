@@ -349,6 +349,13 @@ func TestNativeUnreceiptedTerminalRejoin(t *testing.T) {
 			if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 				t.Fatal(err)
 			}
+			if condition == v1beta1.ConditionFailed {
+				// R6: Failed is absorbing until deletion, whatever the worker shows.
+				if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.logs != 0 || f.patches != 0 {
+					t.Fatalf("Failed Migration was revived: %v logs=%d patches=%d", err, f.logs, f.patches)
+				}
+				return
+			}
 			if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.logs != 1 {
 				t.Fatalf("stale display bypassed actual terminal clone consumer: %v logs=%d", err, f.logs)
 			}

@@ -85,6 +85,10 @@ func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1be
 	if r.Scheme == nil {
 		return ctrl.Result{}, errNativeReconcile
 	}
+	if nativeFailedAbsorbs(m) {
+		metrics.Record(m)
+		return ctrl.Result{}, nil
+	}
 	worker, pvc, err := r.nativeReconcileResources(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -131,6 +135,11 @@ func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1be
 	}
 	observing = true
 	return r.reconcileNativeRunning(ctx, m, base, worker, pvc)
+}
+
+// nativeFailedAbsorbs is R6: Failed absorbs every action but deletion; it is written only once the worker is engine-free.
+func nativeFailedAbsorbs(m *v1beta1.Migration) bool {
+	return m.DeletionTimestamp.IsZero() && m.Status.Phase == v1beta1.PhaseFailed && meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)
 }
 
 func (r *MigrationReconciler) reconcileNativeHistory(ctx context.Context, m, base *v1beta1.Migration) (bool, ctrl.Result, error) {
@@ -281,15 +290,20 @@ func (r *MigrationReconciler) reconcileNativeRunning(ctx context.Context, m, bas
 	if m.Spec.Suspend || !m.DeletionTimestamp.IsZero() || worker == nil || pvc == nil || !native.NativeReceiptsMatch(m, worker.UID, pvc.UID) {
 		return ctrl.Result{}, errNativeReconcile
 	}
-	// Saved E has its own fresh admission and must survive a stopped or unknown sampler.
-	if followEnabled(m) && nativeControlEnd(m) != "" {
-		r.stopSampling(key)
-		return r.reconcileNativeFollowCutover(ctx, m, worker, pvc, false)
-	}
+	saved := followEnabled(m) && nativeControlEnd(m) != ""
+	// Before the saved-E branch (lifecycle 11): admission needs a running worker pod, and the starting check reads no sample.
 	if nativeWorkerStarting(worker) {
-		// Admission needs a running worker pod; the owned Job's status change wakes this pass.
+		if saved {
+			r.stopSampling(key)
+		}
+		// The owned Job's status change wakes this pass.
 		logf.FromContext(ctx).V(1).Info("native worker pod is not ready yet", "job", worker.Name)
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+	// Saved E has its own fresh admission and must survive a stopped or unknown sampler.
+	if saved {
+		r.stopSampling(key)
+		return r.reconcileNativeFollowCutover(ctx, m, worker, pvc, false)
 	}
 	got, _, sampleErr := r.observeNativeProgress(ctx, m, worker, pvc)
 	if ctx.Err() != nil {
