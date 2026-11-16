@@ -168,6 +168,8 @@ The operator owns the retry policy, so the Migration holds the attempt counts an
   The `ttlSecondsAfterFinished` TTL and manual deletion both delete the Job.
   With `spec.engine: rpgmigrate`, a gone worker Job counts against `backoffLimit` at once.
   A failed worker whose pod is gone retries like one whose pod remains, but without a log to classify the failure.
+  A native worker Job that is `Complete` but whose pod went before the operator read its report also counts as a failed attempt.
+  The operator finishes a native attempt only from that report, or from the receipt it records once it has read it.
 - A deleted pod whose network went with it is an example of a runner lost without closing its connections.
   Such a runner can leave target sessions open with their table locks.
   The [retry gate](#the-retry-gate) holds the next attempt until those sessions are gone, so the attempt does not start behind them.
