@@ -6,6 +6,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +32,13 @@ func (r *MigrationReconciler) finishNativeFollow(ctx context.Context, m, base *v
 	}
 	if observation == nil || !r.nativeVerificationOriginalUnchanged(ctx, entry, worker, pvc, original) {
 		return ctrl.Result{}, errNativeFollowCompletion
+	}
+	if raiseNativeDrainReplay(m, observation.Checkpoint().Evidence()) {
+		// Written alone, while the phase still samples, so the replay gauge carries the proven position.
+		if err := r.updateNativeStatus(ctx, m, base); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 	done, err := r.ensureNativeVerification(ctx, m, worker, pvc)
 	if err != nil {
@@ -99,4 +107,20 @@ func (r *MigrationReconciler) readNativeFinalizationObservation(ctx context.Cont
 
 func nativeFollowCompletionUnchanged(before, after *native.CompletedObservation) bool {
 	return before != nil && after != nil && before.Checkpoint().Evidence() == after.Checkpoint().Evidence() && before.OwnedState().Work() == after.OwnedState().Work() && slices.Equal(before.OwnedState().Resources(), after.OwnedState().Resources())
+}
+
+// raiseNativeDrainReplay moves a sampled status replay up to the verified checkpoint's durable
+// replay LSN. It never lowers it, and an attempt with no replay sample keeps none.
+func raiseNativeDrainReplay(m *v1beta1.Migration, c native.CheckpointEvidence) bool {
+	rs := m.Status.Replication
+	if rs == nil {
+		return false
+	}
+	current, err1 := sentinel.ParseLSN(rs.ReplayLSN)
+	durable, err2 := sentinel.ParseLSN(c.DurableReplayLSN)
+	if err1 != nil || err2 != nil || durable <= current {
+		return false
+	}
+	rs.ReplayLSN = c.DurableReplayLSN
+	return true
 }

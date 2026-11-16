@@ -640,13 +640,16 @@ type ReplicationStatus struct {
 	// Post-cutover drain verification, not this position, proves target application.
 	// With engine rpgmigrate, it is the slot's confirmed_flush_lsn, which only moves on
 	// engine feedback for a target-committed transaction end or a certified keepalive.
+	// Once the operator verifies the cutover drain proof, it is raised to the proof's
+	// durable replay LSN, never lowered.
 	// +optional
 	ReplayLSN string `json:"replayLSN,omitempty"`
 	// endpos is the cutover LSN once set.
 	// +optional
 	Endpos string `json:"endpos,omitempty"`
 	// lagBytes is the byte distance between the source WAL head and replayLSN.
-	// With engine rpgmigrate, it is exactly writeLSN minus replayLSN from one sample.
+	// With engine rpgmigrate, it is exactly writeLSN minus replayLSN from one sample,
+	// until a verified drain proof raises replayLSN.
 	// +optional
 	LagBytes *int64 `json:"lagBytes,omitempty"`
 }
