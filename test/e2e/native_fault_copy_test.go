@@ -43,16 +43,24 @@ const (
 	// loopback without TLS: 4 GiB is about 30 s there, still 15 s at twice that rate.
 	nativeFaultBulkBytes = int64(4) << 30
 	nativeFaultBulkRows  = nativeFaultBulkBytes / nativeFaultBulkPayloadBytes
-	// nativeFaultBulkTotalSQL is the exact text COPY stream: id, tab, hex payload, newline.
+	// nativeFaultBinaryFraming is the 19-byte header and 2-byte trailer of every binary COPY stream.
+	nativeFaultBinaryFraming = 21
+	nativeFaultCopyText      = "text"
+	nativeFaultCopyBinary    = "binary"
+	// nativeFaultBulkTotalSQL sizes both COPY formats exactly: a text row is id, tab, payload and
+	// newline; a binary row is a field count, two lengths, the 8-byte bigint and the payload.
 	nativeFaultBulkTotalSQL = "SELECT count(*) || '|' ||" +
-		" coalesce(sum(octet_length(id::text) + octet_length(payload) + 2), 0) FROM ONLY " + nativeFaultBulkTable
-	// nativeFaultBulkCopySQL pairs the COPY's 32-bit xid with a snapshot xmax, from which
-	// nativeFaultFullXID derives the xid8. It reads every session's COPY, and the parser
-	// refuses one not named like the engine's, so an unnamed engine cannot hide its COPY.
+		" coalesce(sum(octet_length(id::text) + octet_length(payload) + 2), 0) || '|' ||" +
+		" coalesce(sum(octet_length(payload) + 18), 0) FROM ONLY " + nativeFaultBulkTable
+	// nativeFaultBulkCopySQL reads one row per COPY into the bulk table, so split parts each show,
+	// with the format the engine's statement names. The parser refuses a session not named like
+	// the engine's, so an unnamed engine cannot hide its COPY. The snapshot xmax lets
+	// nativeFaultFullXID widen the 32-bit xid to xid8.
 	nativeFaultBulkCopySQL = "SELECT p.bytes_processed || '|' || round(extract(epoch FROM now() - a.query_start), 3)" +
 		" || '|' || coalesce(a.backend_xid::text, '') || '|' || pg_snapshot_xmax(pg_current_snapshot())" +
+		` || '|' || coalesce(substring(a.query from ' FROM STDIN WITH \(FORMAT (text|binary)(?:, FREEZE true)?\);?$'), '')` +
 		" || '|' || a.application_name FROM pg_stat_progress_copy p JOIN pg_stat_activity a ON a.pid = p.pid" +
-		" WHERE p.command = 'COPY FROM' AND p.relid = to_regclass('" + nativeFaultBulkTable + "')"
+		" WHERE p.command = 'COPY FROM' AND p.relid = to_regclass('" + nativeFaultBulkTable + "') ORDER BY p.pid"
 )
 
 // nativeFaultBulkSQL creates the bulk table with rows rows, replacing any earlier one.
@@ -67,67 +75,105 @@ func nativeFaultXactStatusSQL(xid string) string {
 	return "SELECT pg_xact_status(" + sqlLiteral(xid) + "::xid8)"
 }
 
-func parseNativeFaultBulkTotal(out string) (rows, total int64, err error) {
+// nativeFaultBulkSize is the bulk table's exact COPY payload: the text stream, and the
+// binary rows without the framing each binary stream adds.
+type nativeFaultBulkSize struct{ text, binaryRows int64 }
+
+// stream is the most bytes streams concurrent COPYs of format can carry between them.
+func (z nativeFaultBulkSize) stream(format string, streams int) int64 {
+	if format == nativeFaultCopyBinary {
+		return z.binaryRows + nativeFaultBinaryFraming*int64(streams)
+	}
+	return z.text
+}
+
+func parseNativeFaultBulkTotal(out string) (rows int64, size nativeFaultBulkSize, err error) {
 	fields := strings.Split(out, "|")
-	if len(fields) == 2 {
+	if len(fields) == 3 {
 		rows, err = strconv.ParseInt(fields[0], 10, 64)
 		if err == nil {
-			total, err = strconv.ParseInt(fields[1], 10, 64)
+			size.text, err = strconv.ParseInt(fields[1], 10, 64)
+		}
+		if err == nil {
+			size.binaryRows, err = strconv.ParseInt(fields[2], 10, 64)
 		}
 	}
-	if len(fields) != 2 || err != nil || rows <= 0 || total <= 0 {
-		return 0, 0, fmt.Errorf("bulk table total returned %q", out)
+	if len(fields) != 3 || err != nil || rows <= 0 || size.text <= 0 || size.binaryRows <= 0 {
+		return 0, nativeFaultBulkSize{}, fmt.Errorf("bulk table total returned %q", out)
 	}
-	return rows, total, nil
+	return rows, size, nil
 }
 
-// nativeFaultCopySample is one nativeFaultBulkCopySQL reading; present is false when no COPY runs into the table.
+// nativeFaultCopySample sums one nativeFaultBulkCopySQL reading over every engine COPY into the
+// table; present is false when none runs. total is the size for the format and stream count seen.
 type nativeFaultCopySample struct {
-	present bool
-	bytes   int64
-	elapsed float64
-	xid     string
+	present        bool
+	format         string
+	streams        int
+	bytes, total   int64
+	elapsed        float64
+	xid            string
+	xidStreamBytes int64
 }
 
-func parseNativeFaultCopy(out string, total int64) (nativeFaultCopySample, error) {
+func parseNativeFaultCopy(out string, size nativeFaultBulkSize) (nativeFaultCopySample, error) {
+	s := nativeFaultCopySample{}
 	if out == "" {
-		return nativeFaultCopySample{}, nil
-	}
-	fields := strings.SplitN(out, "|", 5)
-	if len(fields) != 5 || strings.Contains(out, "\n") {
-		return nativeFaultCopySample{}, fmt.Errorf("COPY progress returned %q, not one COPY into the bulk table", out)
-	}
-	if name := fields[4]; !strings.HasPrefix(name, "rpgmigrate[") || !strings.HasSuffix(name, "] copy") {
-		return nativeFaultCopySample{}, fmt.Errorf("the bulk table COPY runs as application_name %q,"+
-			" not rpgmigrate[<pid>] copy", name)
-	}
-	s := nativeFaultCopySample{present: true}
-	var err error
-	if s.bytes, err = strconv.ParseInt(fields[0], 10, 64); err != nil || s.bytes < 0 {
-		return s, fmt.Errorf("COPY progress returned bytes %q", fields[0])
-	}
-	if s.bytes > total {
-		return s, fmt.Errorf("COPY processed %d bytes of a %d byte stream: the total is wrong", s.bytes, total)
-	}
-	if s.elapsed, err = strconv.ParseFloat(fields[1], 64); err != nil || s.elapsed < 0 {
-		return s, fmt.Errorf("COPY progress returned elapsed %q", fields[1])
-	}
-	xmax, err := strconv.ParseUint(fields[3], 10, 64)
-	if err != nil || xmax == 0 {
-		return s, fmt.Errorf("COPY progress returned xmax %q", fields[3])
-	}
-	if fields[2] == "" {
 		return s, nil
 	}
-	xid, err := strconv.ParseUint(fields[2], 10, 32)
-	if err != nil || xid == 0 {
-		return s, fmt.Errorf("COPY progress returned xid %q", fields[2])
+	name := ""
+	for line := range strings.SplitSeq(out, "\n") {
+		fields := strings.SplitN(line, "|", 6)
+		if len(fields) != 6 {
+			return s, fmt.Errorf("COPY progress returned %q, not one row per COPY into the bulk table", line)
+		}
+		if n := fields[5]; !strings.HasPrefix(n, "rpgmigrate[") || !strings.HasSuffix(n, "] copy") {
+			return s, fmt.Errorf("the bulk table COPY runs as application_name %q, not rpgmigrate[<pid>] copy", n)
+		}
+		if name != "" && fields[5] != name {
+			return s, fmt.Errorf("the bulk table COPYs run as %q and %q, not one engine", name, fields[5])
+		}
+		name = fields[5]
+		if format := fields[4]; format != nativeFaultCopyText && format != nativeFaultCopyBinary {
+			return s, fmt.Errorf("the bulk table COPY statement names format %q, not text or binary", format)
+		} else if s.format != "" && format != s.format {
+			return s, fmt.Errorf("the bulk table COPYs run as %s and %s, not one recorded format", s.format, format)
+		}
+		s.format = fields[4]
+		n, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil || n < 0 || n > max(size.text, size.stream(nativeFaultCopyBinary, 1)) {
+			return s, fmt.Errorf("COPY progress returned bytes %q", fields[0])
+		}
+		elapsed, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil || elapsed < 0 {
+			return s, fmt.Errorf("COPY progress returned elapsed %q", fields[1])
+		}
+		xmax, err := strconv.ParseUint(fields[3], 10, 64)
+		if err != nil || xmax == 0 {
+			return s, fmt.Errorf("COPY progress returned xmax %q", fields[3])
+		}
+		s.present, s.streams, s.bytes, s.elapsed = true, s.streams+1, s.bytes+n, max(s.elapsed, elapsed)
+		if fields[2] == "" {
+			continue
+		}
+		xid, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil || xid == 0 {
+			return s, fmt.Errorf("COPY progress returned xid %q", fields[2])
+		}
+		full, err := nativeFaultFullXID(uint32(xid), xmax)
+		if err != nil {
+			return s, err
+		}
+		// The least advanced stream with rows on the way is likeliest still open at the kill.
+		if n > 0 && (s.xid == "" || n < s.xidStreamBytes) {
+			s.xid, s.xidStreamBytes = strconv.FormatUint(full, 10), n
+		}
 	}
-	full, err := nativeFaultFullXID(uint32(xid), xmax)
-	if err != nil {
-		return s, err
+	s.total = size.stream(s.format, s.streams)
+	if s.bytes > s.total {
+		return s, fmt.Errorf("%d %s COPYs processed %d bytes of a %d byte table: the total is wrong",
+			s.streams, s.format, s.bytes, s.total)
 	}
-	s.xid = strconv.FormatUint(full, 10)
 	return s, nil
 }
 
@@ -141,17 +187,18 @@ func nativeFaultFullXID(xid uint32, xmax uint64) (uint64, error) {
 	return xmax + uint64(delta), nil
 }
 
-// midCopy is the kill condition: rows are on the way and the transaction that would commit them is known.
-func (s nativeFaultCopySample) midCopy(total int64) bool {
-	return s.present && s.bytes > 0 && s.bytes < total && s.xid != ""
+// midCopy is the kill condition: rows are on the way and a transaction that would commit them is known.
+func (s nativeFaultCopySample) midCopy() bool {
+	return s.present && s.bytes > 0 && s.bytes < s.total && s.xid != ""
 }
 
-func (s nativeFaultCopySample) complete(total int64) bool { return s.present && s.bytes == total }
+func (s nativeFaultCopySample) complete() bool { return s.present && s.bytes == s.total }
 
 // nativeFaultBulk is the spec-local plan table whose COPY the fault interrupts. probeGap is
 // the longest time between two probe starts, which bounds how late the probe can see the COPY.
 type nativeFaultBulk struct {
-	rows, total         int64
+	rows                int64
+	size                nativeFaultBulkSize
 	probes              int
 	probeGap, probeExec time.Duration
 }
@@ -162,11 +209,11 @@ func createNativeFaultBulk() *nativeFaultBulk {
 	GinkgoHelper()
 	DeferCleanup(func() { psql(sourceCluster, "DROP TABLE IF EXISTS "+nativeFaultBulkTable) })
 	psqlBulk(sourceCluster, "SET ROLE "+sqlIdent(appRole(sourceCluster))+"; "+nativeFaultBulkSQL(nativeFaultBulkRows))
-	rows, total, err := parseNativeFaultBulkTotal(psql(sourceCluster, nativeFaultBulkTotalSQL))
+	rows, size, err := parseNativeFaultBulkTotal(psql(sourceCluster, nativeFaultBulkTotalSQL))
 	Expect(err).NotTo(HaveOccurred())
 	Expect(rows).To(Equal(nativeFaultBulkRows), "the bulk table holds the wrong row count")
-	Expect(total).To(BeNumerically(">=", nativeFaultBulkBytes), "the bulk table COPY is smaller than sized")
-	return &nativeFaultBulk{rows: rows, total: total}
+	Expect(size.text).To(BeNumerically(">=", nativeFaultBulkBytes), "the bulk table COPY is smaller than sized")
+	return &nativeFaultBulk{rows: rows, size: size}
 }
 
 // waitMidCopy polls the target until the bulk table is mid-copy and returns that sample.
@@ -188,14 +235,14 @@ func (b *nativeFaultBulk) waitMidCopy(stop func(Gomega) string) nativeFaultCopyS
 		out, err := psqlDBErr(targetCluster, appDatabase(targetCluster), nativeFaultBulkCopySQL)
 		b.probeExec = max(b.probeExec, time.Since(start))
 		g.Expect(err).NotTo(HaveOccurred())
-		s, err := parseNativeFaultCopy(out, b.total)
+		s, err := parseNativeFaultCopy(out, b.size)
 		if err != nil {
 			StopTrying(err.Error()).Now()
 		}
-		if s.complete(b.total) {
+		if s.complete() {
 			StopTrying("the bulk table COPY was seen only complete").Now()
 		}
-		g.Expect(s.midCopy(b.total)).To(BeTrue(), "the bulk table is not mid-copy: %+v", s)
+		g.Expect(s.midCopy()).To(BeTrue(), "the bulk table is not mid-copy: %+v", s)
 		sample = s
 	}, suiteWait(migrationTimeout), 250*time.Millisecond).Should(Succeed())
 	return sample
@@ -232,12 +279,14 @@ func (b *nativeFaultBulk) expectRows(target string, resumed bool) {
 	}
 }
 
-// report records a midCopy sample, so bytes is above zero.
+// report records a midCopy sample, so bytes is above zero. With several streams the window
+// projects from their summed bytes over the longest elapsed time.
 func (b *nativeFaultBulk) report(s nativeFaultCopySample) {
-	window := fmt.Sprintf("%.1fs", s.elapsed*float64(b.total)/float64(s.bytes))
-	AddReportEntry("native fault copy kill", fmt.Sprintf("table=%s rows=%d total_bytes=%d bytes_at_kill=%d (%.1f%%)"+
-		" copy_elapsed=%.3fs projected_window=%s %s xid=%s", nativeFaultBulkTable, b.rows, b.total, s.bytes,
-		100*float64(s.bytes)/float64(b.total), s.elapsed, window, b.probeTimes(), s.xid))
+	window := fmt.Sprintf("%.1fs", s.elapsed*float64(s.total)/float64(s.bytes))
+	AddReportEntry("native fault copy kill", fmt.Sprintf("table=%s rows=%d format=%s streams=%d total_bytes=%d"+
+		" bytes_at_kill=%d (%.1f%%) copy_elapsed=%.3fs projected_window=%s %s xid=%s", nativeFaultBulkTable, b.rows,
+		s.format, s.streams, s.total, s.bytes, 100*float64(s.bytes)/float64(s.total), s.elapsed, window,
+		b.probeTimes(), s.xid))
 }
 
 // probeTimes reports the probe timings. A single probe has no gap, so its gap reads
@@ -262,44 +311,55 @@ func TestNativeFaultBulkProbeTimes(t *testing.T) {
 }
 
 func TestNativeFaultCopyProgress(t *testing.T) {
-	const total, engineCopy = 1000, "|rpgmigrate[42] copy"
+	const engineCopy = "|rpgmigrate[42] copy"
+	text := nativeFaultBulkSize{text: 1000, binaryRows: 2000}
 	for _, tc := range []struct {
 		name          string
 		out           string
 		mid, complete bool
 	}{
 		{"missing row", "", false, false},
-		{"zero bytes", "0|0.250|7|8" + engineCopy, false, false},
-		{"partial", "400|3.000|7|8" + engineCopy, true, false},
-		{"partial without a transaction", "400|3.000||8" + engineCopy, false, false},
-		{"last byte pending", "999|9.000|7|8" + engineCopy, true, false},
-		{"complete", "1000|10.000|7|8" + engineCopy, false, true},
+		{"zero bytes", "0|0.250|7|8|text" + engineCopy, false, false},
+		{"partial", "400|3.000|7|8|text" + engineCopy, true, false},
+		{"partial without a transaction", "400|3.000||8|text" + engineCopy, false, false},
+		{"last byte pending", "999|9.000|7|8|text" + engineCopy, true, false},
+		{"complete", "1000|10.000|7|8|text" + engineCopy, false, true},
+		{"binary one stream", "2000|9.000|7|8|binary" + engineCopy, true, false},
+		{"binary one stream complete", "2021|9.000|7|8|binary" + engineCopy, false, true},
+		{"text parts", "400|3.000|7|8|text" + engineCopy + "\n500|2.000|9|8|text" + engineCopy, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := parseNativeFaultCopy(tc.out, total)
+			s, err := parseNativeFaultCopy(tc.out, text)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if s.midCopy(total) != tc.mid || s.complete(total) != tc.complete {
-				t.Fatalf("%+v: mid %t complete %t", s, s.midCopy(total), s.complete(total))
+			if s.midCopy() != tc.mid || s.complete() != tc.complete {
+				t.Fatalf("%+v: mid %t complete %t", s, s.midCopy(), s.complete())
 			}
 		})
 	}
 	for _, out := range []string{
-		"1001|1|7|8", "-1|1|7|8", "x|1|7|8", "1|x|7|8", "1|-1|7|8", "1|1|0|8", "1|1|7;|8", "1|1|4294967296|8",
-		"1|1|7|0", "1|1|7|x", "1|1|7|", "1|1|4294967295|5", "1|1|7|8" + engineCopy + "\n2|1|7|8",
+		"1001|1|7|8|text", "-1|1|7|8|text", "x|1|7|8|text", "1|x|7|8|text", "1|-1|7|8|text", "1|1|0|8|text",
+		"1|1|7;|8|text", "1|1|4294967296|8|text", "1|1|7|0|text", "1|1|7|x|text", "1|1|7||text",
+		"1|1|4294967295|5|text", "1|1|7|8||", "1|1|7|8|csv", "1|1|7|8|", "2022|1|7|8|binary",
+		"1|1|7|8|text" + engineCopy + "\n2|1|7|8", "1|1|7|8|text" + engineCopy + "\n2|1|7|8|binary",
+		"600|1|7|8|text" + engineCopy + "\n401|1|9|8|text", "1|1|7|8|text" + engineCopy + "\n",
 	} {
-		if _, err := parseNativeFaultCopy(out+engineCopy, total); err == nil {
+		if _, err := parseNativeFaultCopy(out+engineCopy, text); err == nil {
 			t.Errorf("COPY progress %q admitted", out+engineCopy)
 		}
 	}
-	for _, out := range []string{"1|1|7", "1|1|7|8", "1|1|7|8|", "1|1|7|8|psql", "1|1|7|8|rpgmigrate[42] apply",
-		"1|1|7|8|pgcopydb[42] copy", "1|1|7|8|xrpgmigrate[42] copy", "1|1|7|8|rpgmigrate[42] copy "} {
-		if _, err := parseNativeFaultCopy(out, total); err == nil {
+	for _, out := range []string{"1|1|7|8", "1|1|7|8|text", "1|1|7|8|text|", "1|1|7|8|text|psql",
+		"1|1|7|8|text|rpgmigrate[42] apply", "1|1|7|8|text|pgcopydb[42] copy", "1|1|7|8|text|xrpgmigrate[42] copy",
+		"1|1|7|8|text|rpgmigrate[42] copy ", "1|1|7|8|text" + engineCopy + "\n1|1|7|8|text|rpgmigrate[43] copy",
+		"1|1|7|8|text" + engineCopy + "\n1|1|7|8|text|e2e-decoy-copy"} {
+		if _, err := parseNativeFaultCopy(out, text); err == nil {
 			t.Errorf("COPY progress %q admitted", out)
 		}
 	}
-	for _, out := range []string{"", "1", "0|10", "10|0", "x|10", "10|x", "1|2|3"} {
+	for _, out := range []string{
+		"", "1", "0|10|20", "10|0|20", "10|20|0", "x|10|20", "10|x|20", "10|20|x", "1|2", "1|2|3|4",
+	} {
 		if _, _, err := parseNativeFaultBulkTotal(out); err == nil {
 			t.Errorf("bulk total %q admitted", out)
 		}
@@ -322,6 +382,26 @@ func TestNativeFaultCopyProgress(t *testing.T) {
 	}
 }
 
+// TestNativeFaultCopySplitBinary reads the shape the operator defaults give the bulk table:
+// binary parts whose summed bytes pass the one-stream text size, so text sizing would refuse them.
+func TestNativeFaultCopySplitBinary(t *testing.T) {
+	const engineCopy = "|binary|rpgmigrate[42] copy"
+	size := nativeFaultBulkSize{text: 1000, binaryRows: 1500}
+	out := "700" + "|4.000|9|12" + engineCopy + "\n" + "520|2.500|11|12" + engineCopy + "\n" + "0|0.100||12" + engineCopy
+	s, err := parseNativeFaultCopy(out, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := nativeFaultCopySample{present: true, format: "binary", streams: 3, bytes: 1220,
+		total: 1500 + 3*nativeFaultBinaryFraming, elapsed: 4, xid: "11", xidStreamBytes: 520}
+	if s != want || !s.midCopy() || s.complete() {
+		t.Fatalf("split binary sample = %+v, want %+v mid-copy", s, want)
+	}
+	if _, err := parseNativeFaultCopy(out, nativeFaultBulkSize{text: 1000, binaryRows: 1100}); err == nil {
+		t.Fatal("parts past the binary size were admitted")
+	}
+}
+
 // TestNativeFaultCopySQL runs the bulk, progress and commit-status SQL against a real
 // server: the total must equal the COPY stream, and a COPY held open must read mid-copy.
 func TestNativeFaultCopySQL(t *testing.T) {
@@ -329,20 +409,38 @@ func TestNativeFaultCopySQL(t *testing.T) {
 	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
 	t.Cleanup(func() { testQuery(t, run, "DROP TABLE IF EXISTS "+nativeFaultBulkTable) })
 	testQuery(t, run, nativeFaultBulkSQL(64))
-	rows, total, err := parseNativeFaultBulkTotal(testQuery(t, run, nativeFaultBulkTotalSQL))
+	rows, size, err := parseNativeFaultBulkTotal(testQuery(t, run, nativeFaultBulkTotalSQL))
 	if err != nil || rows != 64 {
 		t.Fatalf("bulk total: %d rows, %v", rows, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	stream, err := exec.CommandContext(ctx, "psql", uri, "-XqtA", "-c",
-		"COPY (SELECT id, payload FROM ONLY "+nativeFaultBulkTable+") TO STDOUT WITH (FORMAT text)").Output()
-	if err != nil || int64(len(stream)) != total {
-		t.Fatalf("COPY stream is %d bytes, total SQL says %d: %v", len(stream), total, err)
+	copyOut := func(format, predicate string) []byte {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, "psql", uri, "-XqtA", "-c", "COPY (SELECT id, payload FROM ONLY "+
+			nativeFaultBulkTable+predicate+") TO STDOUT WITH (FORMAT "+format+")").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
 	}
+	stream := copyOut("text", "")
+	if int64(len(stream)) != size.text {
+		t.Fatalf("COPY stream is %d bytes, total SQL says %d", len(stream), size.text)
+	}
+	// Two ctid parts, as the engine splits a table, carry the binary rows plus two framings.
+	binary := nativeFaultCopyBinary
+	first, second := len(copyOut(binary, " WHERE ctid < '(1,0)'")), len(copyOut(binary, " WHERE ctid >= '(1,0)'"))
+	whole := len(copyOut(binary, ""))
+	if first <= nativeFaultBinaryFraming || second <= nativeFaultBinaryFraming ||
+		int64(whole) != size.stream(binary, 1) || int64(first+second) != size.stream(binary, 2) {
+		t.Fatalf("binary COPY is %d bytes whole and %d+%d in two parts, total SQL says %d and %d",
+			whole, first, second, size.stream(binary, 1), size.stream(binary, 2))
+	}
+	total := size.text
 	sample := func() nativeFaultCopySample {
 		t.Helper()
-		s, err := parseNativeFaultCopy(testQuery(t, run, nativeFaultBulkCopySQL), total)
+		s, err := parseNativeFaultCopy(testQuery(t, run, nativeFaultBulkCopySQL), size)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -356,14 +454,14 @@ func TestNativeFaultCopySQL(t *testing.T) {
 		cmd, stdin := startTestCopy(ctx, t, uri, "rpgmigrate[test] copy", stream[:half])
 		var err error
 		var mid nativeFaultCopySample
-		for deadline := time.Now().Add(30 * time.Second); !mid.midCopy(total); time.Sleep(50 * time.Millisecond) {
+		for deadline := time.Now().Add(30 * time.Second); !mid.midCopy(); time.Sleep(50 * time.Millisecond) {
 			if time.Now().After(deadline) {
 				t.Fatalf("a COPY fed %d of %d bytes never read mid-copy: %+v", half, total, mid)
 			}
 			mid = sample()
 		}
-		if mid.bytes > int64(half) {
-			t.Fatalf("COPY processed %d bytes of the %d fed", mid.bytes, half)
+		if mid.bytes > int64(half) || mid.format != "text" || mid.streams != 1 || mid.total != total {
+			t.Fatalf("COPY of %d fed bytes read as %+v, want one text stream of %d", half, mid, total)
 		}
 		if commit {
 			_, err = io.WriteString(stdin, string(stream[half:])+"\\.\nCOMMIT;\n")
@@ -393,7 +491,7 @@ func TestNativeFaultCopySQL(t *testing.T) {
 			t.Fatalf("a COPY into the bulk table after the session ended: %+v", s)
 		}
 	}
-	expectDecoyCopyRefused(ctx, t, run, uri, stream[:half], total)
+	expectDecoyCopyRefused(ctx, t, run, uri, stream[:half], size)
 	if got := testQuery(t, run, "SELECT count(*) FROM ONLY "+nativeFaultBulkTable); got != "64" {
 		t.Fatalf("bulk table holds %s rows after one committed and one killed COPY", got)
 	}
@@ -432,12 +530,14 @@ func killTestCopy(t *testing.T, cmd *exec.Cmd) error {
 
 // expectDecoyCopyRefused runs the COPY an engine without session names would run: the
 // probe must refuse it, never read it as no COPY.
-func expectDecoyCopyRefused(ctx context.Context, t *testing.T, run psqlScript, uri string, head []byte, total int64) {
+func expectDecoyCopyRefused(
+	ctx context.Context, t *testing.T, run psqlScript, uri string, head []byte, size nativeFaultBulkSize,
+) {
 	t.Helper()
 	const decoy = "e2e-decoy-copy"
 	cmd, _ := startTestCopy(ctx, t, uri, decoy, head)
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		_, err := parseNativeFaultCopy(testQuery(t, run, nativeFaultBulkCopySQL), total)
+		_, err := parseNativeFaultCopy(testQuery(t, run, nativeFaultBulkCopySQL), size)
 		if err != nil {
 			if !strings.Contains(err.Error(), `application_name "`+decoy+`"`) {
 				t.Fatal(err)

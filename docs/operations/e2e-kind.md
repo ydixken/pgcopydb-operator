@@ -144,11 +144,16 @@ We sized it from one text COPY of that shape on the shared podman VM, about 135 
 On kind it is shorter: in M7-RUN5 the worker took about 18 seconds from start to streaming with the table and M7-RUN4 took 3.3 without it, which puts the table's COPY near 14 seconds.
 The probe reads the target every 250 ms plus the time one `psql` exec takes.
 During a COPY of this table on the podman VM the longest time between two probe starts was 1.15 seconds, so the window is still about ten times that once the probe starts.
-The spec kills the runner only when the target's `pg_stat_progress_copy` shows that table's COPY with a transaction ID and with bytes processed above zero and below the stream total the source computes.
+With the operator defaults the table qualifies for binary COPY and split parts, so its window on kind is shorter than one text stream's.
+The probe reads one `pg_stat_progress_copy` row per COPY into that table, so each split part shows, and takes the format from the engine's own `COPY ... FROM STDIN WITH (FORMAT text|binary)` statement.
+The source computes the exact text stream and the binary rows, and each binary stream adds 21 bytes of header and trailer, so the probe sizes the streams it sees for the format they name.
+The spec kills the runner only when the bytes processed, summed over those COPYs, are above zero and below that size, and one of them has a transaction ID.
+It keeps the transaction ID of the least advanced COPY with bytes processed, the one likeliest still open when the kill lands.
 It fails if it sees that COPY only complete, or if the Migration fails or starts streaming first.
 It also fails at once when a COPY into that table runs under any `application_name` other than `rpgmigrate[<pid>] copy`, so an engine that leaves its sessions unnamed cannot pass for a COPY the probe never saw.
-After the kill it requires that transaction to end aborted, which proves the kill landed before the table committed.
-The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, the number of probes, the longest time between two probe starts (`probe_gap_max`), and the longest single `psql` exec (`probe_exec_max`).
+It fails the same way when the COPYs name different formats, a format other than text or binary, or different engine sessions.
+After the kill it requires that transaction to end aborted, which proves the kill landed before that COPY committed.
+The `native fault copy kill` entry in `go-test.json` records the format, the number of COPYs, the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, the number of probes, the longest time between two probe starts (`probe_gap_max`), and the longest single `psql` exec (`probe_exec_max`).
 When the first probe already sees the COPY there is no gap to measure, so `probe_gap_max` reads `unmeasured`; one probe cycle then takes about `probe_exec_max` plus the 250 ms poll.
 Keep the projected window at least four times `probe_gap_max` (or that cycle when it is unmeasured), and grow the table if a run shows less.
 The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
