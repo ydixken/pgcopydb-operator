@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -1309,12 +1310,18 @@ func (r *MigrationReconciler) updateStatus(ctx context.Context, m, base *v1beta1
 // second through a cutover drain). Generation bumps still arrive.
 var migrationEvents predicate.Predicate = predicate.GenerationChangedPredicate{}
 
-// SetupWithManager wires the watches. The predicate is on the Migration watch
-// alone; the owned Jobs must deliver every event.
+// nativeHelperJobName matches the native helper Jobs that one pass creates, awaits and deletes under a
+// random name. No later pass can use their events, which would otherwise wake the next pass at once.
+var nativeHelperJobName = regexp.MustCompile(`^rpgmigrate-(cleaned|cleanup|cleanup-rejoin|endpos|evidence|inventory|preflight|retry|version)-[0-9a-f]{32}$`)
+
+var ownedJobEvents = predicate.NewPredicateFuncs(func(o client.Object) bool { return !nativeHelperJobName.MatchString(o.GetName()) })
+
+// SetupWithManager wires the watches. Owned Jobs deliver every event except those of native helper
+// Jobs; the worker and compare Jobs keep theirs, because a later pass waits on them.
 func (r *MigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.Migration{}, builder.WithPredicates(migrationEvents)).
-		Owns(&batchv1.Job{}).
+		Owns(&batchv1.Job{}, builder.WithPredicates(ownedJobEvents)).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ConfigMap{}).
 		Named("migration").

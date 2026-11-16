@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 // t3Reads records which worker and compare Jobs the finish read output from.
@@ -456,6 +457,43 @@ func TestNativeObservationBeforeCompareAndCleanup(t *testing.T) {
 	cleanup := slices.Index(steps, jobKindCleanup)
 	if cleanup < 0 || !slices.Contains(steps[:cleanup], finishEndposKind) || !slices.Contains(steps[:cleanup], finishEvidenceJobKind) {
 		t.Fatalf("cleanup ran without a fresh drain observation in its pass: %v", steps)
+	}
+}
+
+// Lifecycle 6: native helper Job events no longer wake passes; the worker, compare and legacy Jobs keep theirs.
+func TestNativeHelperJobEventsDropped(t *testing.T) {
+	hex := strings.Repeat("0123456789abcdef", 2)
+	for name, delivered := range map[string]bool{
+		"migration-run-1":                             true,
+		"migration-compare-data":                      true,
+		"migration-compare-schema":                    true,
+		"migration-cleanup":                           true,
+		"migration-preflight":                         true,
+		"migration-gate-2":                            true,
+		"migration-rehearsal-1":                       true,
+		"rpgmigrate-cleanup":                          true,
+		"rpgmigrate-version-" + hex[:31]:              true,
+		"rpgmigrate-version-" + hex + "0":             true,
+		"x-rpgmigrate-version-" + hex:                 true,
+		"rpgmigrate-version-" + hex + "-run-1":        true,
+		"rpgmigrate-version-" + hex:                   false,
+		"rpgmigrate-preflight-" + hex:                 false,
+		"rpgmigrate-retry-" + hex:                     false,
+		"rpgmigrate-inventory-" + hex:                 false,
+		"rpgmigrate-cleanup-" + hex:                   false,
+		"rpgmigrate-cleanup-rejoin-" + hex:            false,
+		"rpgmigrate-cleaned-" + hex:                   false,
+		"rpgmigrate-endpos-" + hex:                    false,
+		"rpgmigrate-evidence-" + hex:                  false,
+		"rpgmigrate-evidence-" + strings.ToUpper(hex): true,
+	} {
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		if got := ownedJobEvents.Create(event.CreateEvent{Object: job}); got != delivered {
+			t.Errorf("%s: delivered=%v, want %v", name, got, delivered)
+		}
+		if got := ownedJobEvents.Update(event.UpdateEvent{ObjectOld: job, ObjectNew: job}); got != delivered {
+			t.Errorf("%s update: delivered=%v, want %v", name, got, delivered)
+		}
 	}
 }
 
