@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"encoding/json"
 	"path"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -142,5 +144,38 @@ func setPassfile(spec *corev1.PodSpec, file string) {
 		if e.Name == "PGPASSFILE" {
 			spec.Containers[0].Env[i].Value = file
 		}
+	}
+}
+
+// Native admission compares volumes with reflect.DeepEqual, so every native size limit must survive API decoding.
+func TestNativeVolumeLimitsSurviveAPIDecoding(t *testing.T) {
+	for name, build := range nativeBuilderRows(t) {
+		t.Run(name, func(t *testing.T) {
+			job, err := build(t)
+			if err != nil || job == nil {
+				t.Fatalf("builder refused its fixture: %v", err)
+			}
+			raw, err := json.Marshal(job.Spec.Template.Spec.Volumes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded []corev1.Volume
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			limits := 0
+			for i, v := range job.Spec.Template.Spec.Volumes {
+				if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil {
+					continue
+				}
+				limits++
+				if !reflect.DeepEqual(v, decoded[i]) {
+					t.Errorf("volume %s size limit %#v decodes as %#v", v.Name, *v.EmptyDir.SizeLimit, *decoded[i].EmptyDir.SizeLimit)
+				}
+			}
+			if limits == 0 && len(job.Spec.Template.Spec.Volumes) != 0 {
+				t.Fatal("native builder mounts volumes but no size-limited emptyDir")
+			}
+		})
 	}
 }

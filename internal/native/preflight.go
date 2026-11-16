@@ -12,6 +12,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -98,7 +99,7 @@ func PreflightMaterialization(m *v1beta1.Migration, operationID string) ([]strin
 		return nil, nil, nil, nil, nil, errors.New("native connection materialization invalid")
 	}
 	env := []corev1.EnvVar{}
-	volumes := []corev1.Volume{{Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(64*1024*1024, resource.BinarySI)}}}}
+	volumes := []corev1.Volume{{Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi"))}}}}
 	mounts := []corev1.VolumeMount{{Name: nativePreflightTmp, MountPath: "/tmp"}}
 	var preludes []string
 	var passfiles []conn.Passfile

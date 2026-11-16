@@ -11,6 +11,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 )
 
 var errNativeEndposJob = errors.New("native endpos job configuration invalid")
@@ -58,7 +59,7 @@ func buildNativeEndposJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClai
 	pod := &job.Spec.Template.Spec
 	pod.Volumes = append([]corev1.Volume{
 		{Name: workdirVolume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}},
-		{Name: nativeEndposTmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(64*1024*1024, resource.BinarySI)}}},
+		{Name: nativeEndposTmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi"))}}},
 	}, target.Volumes...)
 	c := &pod.Containers[0]
 	c.Command = []string{shellPath, "-c", prelude, c.Command[0]}

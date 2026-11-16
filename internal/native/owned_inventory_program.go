@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 )
 
 //go:embed owned_inventory_program.py
@@ -76,7 +77,7 @@ func OwnedInventoryMaterialization(m *v1beta1.Migration, w ExecutionData) ([]str
 		return nil, nil, nil, nil, nil, ErrNativeOwnedStateUnavailable
 	}
 	env := []corev1.EnvVar{}
-	volumes := []corev1.Volume{{Name: resourceKindWorkdir, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: w.PVCName, ReadOnly: true}}}, {Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(64*1024*1024, resource.BinarySI)}}}}
+	volumes := []corev1.Volume{{Name: resourceKindWorkdir, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: w.PVCName, ReadOnly: true}}}, {Name: nativePreflightTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi"))}}}}
 	mounts := []corev1.VolumeMount{{Name: resourceKindWorkdir, MountPath: nativeOwnedWorkMount, ReadOnly: true}, {Name: nativePreflightTmp, MountPath: nativeRetryTmpPath}}
 	var preludes []string
 	var passfiles []conn.Passfile

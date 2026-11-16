@@ -11,6 +11,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -82,7 +83,7 @@ func buildNativeCleanupJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeCla
 	pod := &job.Spec.Template.Spec
 	pod.Volumes = []corev1.Volume{
 		{Name: workdirVolume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name}}},
-		{Name: nativeEndposTmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(64*1024*1024, resource.BinarySI)}}},
+		{Name: nativeEndposTmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi"))}}},
 	}
 	c := &pod.Containers[0]
 	c.VolumeMounts = []corev1.VolumeMount{{Name: workdirVolume, MountPath: pgcopydb.WorkMount}, {Name: nativeEndposTmpVolume, MountPath: nativeCleanupTmpPath}}
