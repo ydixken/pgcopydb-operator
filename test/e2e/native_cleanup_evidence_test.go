@@ -171,6 +171,20 @@ func nativeCleanupJobs(owner types.UID) (seen, succeeded []string) {
 	return seen, succeeded
 }
 
+// nativeOwnedJobs returns every Job owner controlled that the watch saw.
+func nativeOwnedJobs(owner types.UID) []string {
+	nativeJobs.mu.Lock()
+	defer nativeJobs.mu.Unlock()
+	var names []string
+	for _, r := range nativeJobs.seen {
+		if r.owner == owner {
+			names = append(names, r.name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // startNativeJobRecorder watches the suite namespace's Jobs for the rest of the run.
 func startNativeJobRecorder() {
 	GinkgoHelper()

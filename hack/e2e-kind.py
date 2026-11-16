@@ -85,7 +85,8 @@ NATIVE_SPECS = {
     'early-manual': ('native', 'Migration holds early Manual approval until a paused backlog catches up'),
     'live-writer': ('native', 'Migration loses no committed transaction when the source is written throughout'),
     'automatic-cutover': ('native', 'Migration runs an Automatic cutover to completion unattended'),
-    'native-refusal': ('native', 'Migration refuses the legacy-only fixture before any database change and deletes cleanly'),
+    'native-refusal': ('native', 'Migration refuses an unlogged table before any database change and deletes cleanly'),
+    'native-widening': ('native', 'Migration follows the legacy fixture through a verified cutover with every object and row'),
     'fault-copy': ('native-fault', 'Native faults resumes or fails closed when the runner is killed mid-copy'),
     'fault-stream': ('native-fault', 'Native faults resumes or fails closed when the runner is killed mid-stream'),
     'fault-drain': ('native-fault', 'Native faults completes or fails closed when the runner is killed mid-drain'),
@@ -1334,11 +1335,10 @@ class Guard:
     def selection(engine, pair=None, case=None):
         if engine == 'pgcopydb' and pair in (None, '17:17') and case is None:
             return {'engine': engine, 'pair': '17:17', 'label': 'kind-bootstrap', 'spec': LEGACY_SPEC}
-        # native-refusal's legacy-only fixture is qualified on 16:16 alone.
-        if engine == 'rpgmigrate' and pair in NATIVE_PAIRS and case in NATIVE_SPECS and (case != 'native-refusal' or pair == '16:16'):
+        if engine == 'rpgmigrate' and pair in NATIVE_PAIRS and case in NATIVE_SPECS:
             label, spec = NATIVE_SPECS[case]
             return {'engine': engine, 'pair': pair, 'label': label, 'spec': spec}
-        raise Refusal('kind route admits legacy pgcopydb 17:17, or native rpgmigrate 16:16, 18:18 or 16:18 with one named spec (native-refusal on 16:16 only)')
+        raise Refusal('kind route admits legacy pgcopydb 17:17, or native rpgmigrate 16:16, 18:18 or 16:18 with one named spec')
 
     def receipt(self, ledger, selection):
         path = self.directory / 'suite-receipt.json'

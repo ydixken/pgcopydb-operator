@@ -279,7 +279,7 @@ func (c *nativeFaultCase) expectInvariant(m *v1beta1.Migration, sets ...nativeFa
 	}
 	tables := []string{kindPublicSchema + "." + kindOrdersTable}
 	if c.bulk != nil {
-		c.bulk.expectRows(c.target, resumed)
+		c.bulk.expectRows(c.target, c.run, resumed)
 		tables = append(tables, nativeFaultBulkTable)
 	}
 	if resumed {

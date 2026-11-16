@@ -172,8 +172,8 @@ It seeds each source through a Kubernetes Job running `test/e2e/fixtures/run.sh`
 With the `E2E_SOURCE_*` and `E2E_TARGET_*` variables set it runs in external mode instead: it uses an existing database pair, creates no CNPG clusters, and seeds the source through the same Job (see [Running the E2E suite against your databases](docs/operations/e2e-external.md)).
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.
 For the `pgcopydb` engine it also applies `legacy.sql` after the loads and before `finish.sql`.
-That file holds the objects the native engine refuses before any database change: the materialized view, the generated column, the domain `CHECK`, the citext `UNIQUE` index, and the expression and partial indexes.
-We keep them out of the native fixture so a native run qualifies on what the engine supports, and the native `native-refusal` spec applies the file to prove the refusal.
+That file holds the objects the native fixture leaves out: the materialized view, the generated column, the domain `CHECK`, the citext `UNIQUE` index, and the expression and partial indexes.
+We keep them out of the native fixture so the other native specs do not depend on the M8 engine widening, and the `native-widening` spec applies the file to a seeded native source and follows it through cutover.
 The seed Job passes the engine as `SEED_ENGINE`, `run.sh` refuses any other value, and the engine is part of the seed profile, so switching engines recreates a kept source.
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
 The non-unique secondary indexes are built once by `finish.sql` rather than maintained per insert.

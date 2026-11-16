@@ -133,25 +133,44 @@ macOS pauses the monotonic clock while the host sleeps, so a wall-only expiry is
 On macOS, `up`, `pull`, and the legacy and native runs require AC power and hold a `caffeinate -dims` child for the command's lifetime.
 The guard refuses when `pmset` does not show that child's system-sleep assertions.
 The assertions do not stop a lid-close sleep, so keep the lid open and stay attended for the whole lease.
-`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, `native-refusal`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
-A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legacy.sql`: the objects the native engine refuses before any database change.
-`native-refusal`, which the guard admits on pair 16:16 only, applies that file to the source and expects the Migration to fail with reason `NativeBadConfig`, with neither database changed.
-Its budget for the refusal is 15 minutes: the 10 minutes a worker pod may wait for a node, plus 5 for the preflight.
-It then deletes the Migration and expects the finalizer to clear within five minutes after an owned inventory, with no cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
-It restores the native fixture afterwards, so other native specs on the same source see the shape they expect.
+`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, `native-refusal`, `native-widening`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
+The guard admits every spec on all three native pairs and refuses any other pair or spec name.
+A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legacy.sql`: the materialized view, the generated column, the domain `CHECK`, the citext `UNIQUE` index, and the expression and partial indexes.
+`native-refusal` creates one unlogged table on the source and runs two native Migrations over it, a clone-only one and then a follow one.
+Native clone refuses an unlogged relation while it plans, before it changes either database, so the spec expects the clone Migration to fail with reason `NativeBadConfig` after one attempt, with clone's relation refusal in the worker log and neither database changed.
+The operator's native follow preflight refuses an unlogged table itself, so the follow Migration never reaches the engine.
+The spec expects it to fail with reason `NativePreflightFailed` and the message `native preflight execution refused: error class result` on its `Failed` and `Validated` conditions, with no attempt, no worker, no work volume and neither database changed.
+Each refusal has a budget of 15 minutes: the 10 minutes a worker pod may wait for a node, plus 5 for the preflight.
+The spec deletes each Migration and expects it gone within five minutes, with no inventory or cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
+The follow Migration holds the finalizer until then, so its deletion proves the operator releases it without reading an inventory.
+Its preflight Jobs are the positive control: the suite's Job watch must have seen one, so seeing no inventory, cleanup or worker Job means something.
+It drops the unlogged table afterwards, so other native specs on the same source see the shape they expect.
+`native-widening` applies `legacy.sql` to the source and runs a Manual follow Migration with schema and data verification.
+While it streams, the spec writes one row through the domain `CHECK`, the citext `UNIQUE` index, the expression and partial indexes and the generated column, then approves the cutover.
+It expects one attempt, `CutoverComplete` and `Verified`, the native cleanup and drain proofs, every widened object and the populated materialized view on the target, and the written rows, seed counts, large objects and sequences equal on both sides.
+It deletes its rows and restores the native fixture afterwards.
+It passes only on a runner whose follow and clone admit those objects, so it needs the M8 engine widening in the runner and a lock that pins it.
 `fault-copy` first creates `public.e2e_nfault_bulk` on the source: a bigint primary key and an 8 KiB text payload per row, 4 GiB of text COPY that pglz keeps near 110 MB on each volume.
 We sized it from one text COPY of that shape on the shared podman VM, about 135 MB/s over loopback without TLS, so its copy window is about 30 seconds there.
 On kind it is shorter: in M7-RUN5 the worker took about 18 seconds from start to streaming with the table and M7-RUN4 took 3.3 without it, which puts the table's COPY near 14 seconds.
 The probe reads the target every 250 ms plus the time one `psql` exec takes.
 During a COPY of this table on the podman VM the longest time between two probe starts was 1.15 seconds, so the window is still about ten times that once the probe starts.
-The spec kills the runner only when the target's `pg_stat_progress_copy` shows that table's COPY with a transaction ID and with bytes processed above zero and below the stream total the source computes.
+With the operator defaults the table qualifies for binary COPY and split parts, so its window on kind is shorter than one text stream's.
+The probe reads one `pg_stat_progress_copy` row per COPY into that table, so each split part shows, and takes the format from the engine's own `COPY ... FROM STDIN WITH (FORMAT text|binary)` statement.
+The source computes the exact text stream and the binary rows, and each binary stream adds 21 bytes of header and trailer, so the probe sizes the streams it sees for the format they name.
+The spec kills the runner only when the bytes processed, summed over those COPYs, are above zero and below that size, and one of them has a transaction ID.
+It keeps the transaction ID of the least advanced COPY with bytes processed, the one likeliest still open when the kill lands.
 It fails if it sees that COPY only complete, or if the Migration fails or starts streaming first.
 It also fails at once when a COPY into that table runs under any `application_name` other than `rpgmigrate[<pid>] copy`, so an engine that leaves its sessions unnamed cannot pass for a COPY the probe never saw.
-After the kill it requires that transaction to end aborted, which proves the kill landed before the table committed.
-The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, the number of probes, the longest time between two probe starts (`probe_gap_max`), and the longest single `psql` exec (`probe_exec_max`).
+It fails the same way when the COPYs name different formats, a format other than text or binary, or different engine sessions.
+After the kill it requires that transaction to end aborted, which proves the kill landed before that COPY committed.
+The `native fault copy kill` entry in `go-test.json` records the format, the number of COPYs, the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, the number of probes, the longest time between two probe starts (`probe_gap_max`), and the longest single `psql` exec (`probe_exec_max`).
 When the first probe already sees the COPY there is no gap to measure, so `probe_gap_max` reads `unmeasured`; one probe cycle then takes about `probe_exec_max` plus the 250 ms poll.
 Keep the projected window at least four times `probe_gap_max` (or that cycle when it is unmeasured), and grow the table if a run shows less.
-The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
+The invariant checks the table too: every row on the source and on a resumed target, each as the source generated it.
+Split parts commit one by one, so a target that failed closed may hold whole parts.
+There every row must be a distinct source row inside the source blocks of a part that the engine's `_rpgmigrate_<run>.copy_done` rows record done for the copy generation in `_rpgmigrate_<run>.checkpoint`, and the row count must equal the sum of those parts' rows.
+A torn, duplicated, extra or misplaced part fails, and so does a target bulk table without exactly one clone control.
 The spec drops it from the source after the Migration's own cleanup.
 The fault specs find the engine's sessions by their `rpgmigrate[<pid>] <role>` names.
 Each one first requires that count above zero on the source and the target while the engine runs, and only then admits a later zero as the sessions having ended.
@@ -160,7 +179,8 @@ A native follow spec proves its cleanup positively.
 The operator deletes the `rpgmigrate-cleanup-<operation>` Job before the Migration completes, so the suite watches the namespace's Jobs from the first native Migration on and requires one owned by the Migration to have succeeded.
 It also requires the status to record the finalized worker, no `rpgm_s_<run>_` slot, `rpgm_p_<run>_` publication or source `_rpgmigrate_<run>` schema, and the target `_rpgmigrate_<run>` schema that cleanup retains.
 The shared slot and origin counts follow the engine, and each refuses to count when its filter would not match a name that engine creates.
-A native fresh clone expects the seeded large objects to stay on the source, because native runs with large objects off.
+A native Migration keeps only its spec's table jobs and runs the other clone options at the operator defaults: binary COPY with text fallback, split parts and large objects.
+Admission requires the runner to advertise `copy.binary_fallback`, `copy.split` and `copy.large_objects` for them, and a native fresh clone expects every seeded large object on the target.
 A native drain has no `<name>-verify` Job, so live-writer and automatic-cutover require `NativeDrainConfirmed`, no `drain` progress item, and one completed row in the target `_rpgmigrate_<run>.checkpoint` whose drain ends at `status.replication.endpos` with a witness the engine admits.
 Its data progress item must come from the pinned native compare helper, observed no earlier than the compare's recorded completion.
 The guard binds the engine, pair and full spec text into `suite-input.json`, and `TestE2E` focuses on exactly that spec, so a native run never executes a second one.
