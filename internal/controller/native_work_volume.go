@@ -85,7 +85,7 @@ func (r *MigrationReconciler) failNativeWorkVolumeLost(ctx context.Context, m, b
 	if _, err := r.nativeWorkerEngineFree(ctx, worker); err != nil {
 		return r.holdNativeBusy(ctx, m, base, err)
 	}
-	msg := fmt.Sprintf("Work PVC %s is missing, deleting or replaced, so the native state of attempt %d is lost; delete the Migration, which releases it with CleanupFailed", workPVCName(m), m.Status.Attempts)
+	msg := fmt.Sprintf("Work PVC %s is missing, deleting or replaced, so the native state of attempt %d is lost", workPVCName(m), m.Status.Attempts)
 	desired := m.DeepCopy()
 	desired.Status.ObservedGeneration = desired.Generation
 	r.nativeCloneAttemptEnded(desired, reasonCloneFailed)
