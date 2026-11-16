@@ -249,7 +249,8 @@ func TestNativePodStatusDriftHelperReads(t *testing.T) {
 		})
 	})
 	t.Run("compare helper pin reset", func(t *testing.T) {
-		checkPodStatusDrift(t, 0b1100000, 0, func(t *testing.T, wrap driftWrap) bool {
+		// The retry drops pinned compares by UID with no spec or state match (design B R4), so no move is refused.
+		checkPodStatusDrift(t, ^uint(0), 0, func(t *testing.T, wrap driftWrap) bool {
 			f := newNativeDispositionFixture(t, false)
 			installRecoveryCompare(t, f, compareSchema)
 			installRecoveryCompare(t, f, compareData)

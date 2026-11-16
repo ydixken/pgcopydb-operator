@@ -48,6 +48,8 @@ When the pod is already gone, the condition carries only the Job message.
 | [Phase `Failed`, reason `DrainIncomplete`](#phase-failed-with-reason-drainincomplete) | Cutover and verification |
 | [Phase `CutoverPending` and nothing happens](#phase-cutoverpending-and-nothing-happens) | Cutover and verification |
 | [Phase `Failed`, reason `OwnershipFailed`](#ownership-handover-failures) | Ownership handover failures |
+| [`Blocked` is True, or a native Migration stays deleting](#blocked-is-true) | Native suspend and deletion |
+| [`CleanupFailed` is True, or a `CleanupFailed` event on a native Migration](#cleanupfailed-is-true) | Native suspend and deletion |
 | [Event `... exists but belongs to another owner`](#exists-but-belongs-to-another-owner) | Workers and cluster objects |
 | [`pg_dump: error: server version mismatch`](#pg_dump-reports-a-server-version-mismatch) | Workers and cluster objects |
 | [No worker pod, PVC `Pending`](#no-worker-pod-and-the-pvc-stays-pending) | Workers and cluster objects |
@@ -849,6 +851,68 @@ The Job caps each `ALTER` and its lock wait at 60 seconds, and a session on the 
 The Job sets both caps with `SET LOCAL` inside that statement's own transaction.
 Clear that session.
 Then replay the statements.
+
+## Native suspend and deletion
+
+These sections apply to `spec.engine: rpgmigrate`.
+[Deletion](operations/lifecycle.md#deletion) describes the normal path.
+
+### `Blocked` is True
+
+`Blocked=True` means that the requested action waits until something outside the operator changes.
+The message names the object, and a `Blocked` warning event fires when the reason changes.
+Each reason has its own way out:
+
+- `WorkerPodRemains`: a worker or compare pod has not ended, or its Job is being deleted.
+  A pod on a node that is gone stays terminating until the node object is deleted or tainted `node.kubernetes.io/out-of-service`.
+  The operator waits, because the engine of such a pod may still run.
+- `ForegroundDeletion`: the garbage collector is still deleting the Jobs of a foreground deletion. Wait.
+- `ForeignObject`: a Job or PVC under one of the Migration's names belongs to something else. Delete or rename that object; the operator never touches it.
+- `WorkerModified`: someone edited the running worker Job. Restore it, or suspend or delete the Migration, which deletes the worker.
+- `CleanupUnavailable`: deletion could run cleanup, but the inventory or cleanup helper did not finish. Usually the source or the target is unreachable. Fix the connection, and the operator retries.
+- `StatusIntegrity` or `EvidenceUnavailable`: the receipts in the status contradict the objects. Read the message, and report it with the status and the Job list.
+
+A source that is gone for good keeps a `CleanupUnavailable` deletion waiting forever.
+Release it by hand:
+
+1. Find the run ID, the Migration UID without hyphens:
+
+    ```sh
+    kubectl get migration <name> -o jsonpath='{.metadata.uid}' | tr -d -
+    ```
+
+2. If the source still exists, drop the slots and publications of the run there:
+
+    ```sh
+    psql "<source>" -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE starts_with(slot_name, 'rpgm_s_<run>_')"
+    psql "<source>" -Atc "SELECT format('DROP PUBLICATION %I;', pubname) FROM pg_publication WHERE starts_with(pubname, 'rpgm_p_<run>_')" | psql "<source>"
+    ```
+
+3. Remove the finalizer:
+
+    ```sh
+    kubectl patch migration <name> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+    ```
+
+4. Delete the work PVC, which has no owner reference and so outlives the Migration:
+
+    ```sh
+    kubectl delete pvc <name>-work
+    ```
+
+### `CleanupFailed` is True
+
+`CleanupFailed=True` on a deleted native Migration means that the operator released the finalizer without cleanup.
+Kubernetes made the cleanup pod impossible: reason `NamespaceTerminating` for a namespace being deleted, `WorkVolumeLost` for a work PVC that is missing, deleting or replaced.
+The condition, a `CleanupFailed` warning event, and an error line in the operator log name the slot prefix `rpgm_s_<run>_` and the publication prefix `rpgm_p_<run>_`.
+In a terminating namespace the API server refuses the event, so read the operator log:
+
+```sh
+kubectl -n pgcopydb-system logs deployment/pgcopydb-operator | grep -i 'native cleanup did not run'
+```
+
+A source inside the deleted namespace goes with it.
+For any other source, drop the slots and publications of the run as step 2 of the previous section shows.
 
 ## Workers and cluster objects
 

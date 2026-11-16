@@ -90,6 +90,7 @@ func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 	m, pvc := nativeIdentityObjects()
 	m.Generation, m.ResourceVersion = 1, "1"
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+	nativeBindTestClaim(m, pvc)
 	m.Status.Attempts = 1
 	m.Status.JobName = m.Name + "-run-1"
 	m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: lifecycleEnd}
@@ -698,7 +699,9 @@ func lifecyclePrerequisiteRefusals(t *testing.T) {
 		{"worker_active", func(s *lifecycleAPI, _ *MigrationReconciler) { s.worker.Status.Active = 1 }},
 		{"worker_failed", func(s *lifecycleAPI, _ *MigrationReconciler) { s.worker.Status.Failed = 1 }},
 		{"pvc_pending", func(s *lifecycleAPI, _ *MigrationReconciler) { s.pvc.Status.Phase = corev1.ClaimPending }},
-		{"pvc_foreign", func(s *lifecycleAPI, _ *MigrationReconciler) { s.pvc.OwnerReferences[0].UID = lifecycleReplacement }},
+		{"pvc_foreign", func(s *lifecycleAPI, _ *MigrationReconciler) {
+			s.pvc.Labels[native.WorkClaimMigrationUIDLabel] = lifecycleReplacement
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, r := newLifecycleAPI(t)
@@ -783,7 +786,7 @@ func TestNativeEvidenceFinalCallerComparison(t *testing.T) {
 		{lifecycleAttemptCase, func(s *lifecycleAPI) { s.migration.Status.Attempts++ }},
 		{"worker_uid", func(s *lifecycleAPI) { s.worker.UID = lifecycleReplacement }},
 		{"worker_owner", func(s *lifecycleAPI) { s.worker.OwnerReferences[0].UID = lifecycleReplacement }},
-		{"pvc_owner", func(s *lifecycleAPI) { s.pvc.OwnerReferences[0].UID = lifecycleReplacement }},
+		{"pvc_owner", func(s *lifecycleAPI) { s.pvc.Labels[native.WorkClaimMigrationUIDLabel] = lifecycleReplacement }},
 		{"helper_pod", func(s *lifecycleAPI) { s.pod.UID = lifecycleReplacement }},
 		{"helper_container", func(s *lifecycleAPI) { s.pod.Status.ContainerStatuses[0].ContainerID = lifecycleReplacement }},
 		{"helper_restart", func(s *lifecycleAPI) { s.pod.Status.ContainerStatuses[0].RestartCount++ }},

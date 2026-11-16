@@ -171,6 +171,7 @@ func TestNativeSpecDriftToleratedOnRunningWorker(t *testing.T) {
 			if err := f.store.Delete(ctx, f.current()); err != nil {
 				t.Fatal(err)
 			}
+			f.allowDrop = true
 			if _, err := nativeDispatch(t, f.r, f.current()); errors.Is(err, errNativeReconcile) {
 				t.Fatalf("deletion never reaches disposition after %s edit: %v", field, err)
 			}

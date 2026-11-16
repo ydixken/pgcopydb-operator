@@ -76,7 +76,7 @@ func newNativeFailedWorkerEnv(ctx context.Context, name string, deleting bool) *
 		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
 	}}
-	Expect(controllerutil.SetControllerReference(m, pvc, c.Scheme())).To(Succeed())
+	nativeBindTestClaim(m, pvc)
 	Expect(c.Create(ctx, pvc)).To(Succeed())
 	pvc.Status.Phase = corev1.ClaimBound
 	Expect(c.Status().Update(ctx, pvc)).To(Succeed())
@@ -135,7 +135,7 @@ func (e *nativeDeletionEnv) reconciler() *MigrationReconciler {
 
 func (e *nativeDeletionEnv) create(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 	job, ok := obj.(*batchv1.Job)
-	if !ok {
+	if !ok || nativeDryRun(opts) {
 		return c.Create(ctx, obj, opts...)
 	}
 	if err := c.Create(ctx, job, opts...); err != nil {

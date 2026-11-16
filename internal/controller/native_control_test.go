@@ -76,12 +76,14 @@ type nativeControlFixture struct {
 	mu                   sync.Mutex
 	head                 string
 	heads, sets, patches int
-	sentEnds             []string
-	trace                []string
-	fault                string
-	afterExec            func(bool)
-	beforeGet            func(client.Object)
-	patch                func(context.Context, client.Client, client.Object, client.Patch) error
+	// allowDrop lets a deletion pass drop the worker, as the deletion column of the W table does.
+	allowDrop bool
+	sentEnds  []string
+	trace     []string
+	fault     string
+	afterExec func(bool)
+	beforeGet func(client.Object)
+	patch     func(context.Context, client.Client, client.Object, client.Patch) error
 }
 
 func newNativeControlFixture(t *testing.T) *nativeControlFixture {
@@ -89,6 +91,7 @@ func newNativeControlFixture(t *testing.T) *nativeControlFixture {
 	m, pvc := nativeWorkerJobInputs()
 	narrowNativeWorker(m)
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+	nativeBindTestClaim(m, pvc)
 	m.Spec.Cutover.Approved = true
 	m.Status.Attempts = 1
 	m.Status.JobName = jobName(m, 1)
@@ -128,13 +131,34 @@ func newNativeControlFixture(t *testing.T) *nativeControlFixture {
 			t.Fatal("control used cached API GET")
 			return errBoom
 		},
-		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if nativeDryRun(opts) {
+				return c.Create(ctx, obj, opts...)
+			}
 			t.Fatal("control created a resource")
 			return errBoom
 		},
-		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
-			t.Fatal("control deleted a resource")
-			return errBoom
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if !f.allowDrop {
+				t.Fatal("control deleted a resource")
+				return errBoom
+			}
+			// A deletion pass drops a worker it cannot TERM; the garbage collector removes its pods.
+			if err := c.Delete(ctx, obj, opts...); err != nil {
+				return err
+			}
+			pods := &corev1.PodList{}
+			if err := c.List(ctx, pods); err != nil {
+				return err
+			}
+			for i := range pods.Items {
+				if owner := metav1.GetControllerOf(&pods.Items[i]); owner != nil && owner.UID == obj.GetUID() {
+					if err := c.Delete(ctx, &pods.Items[i]); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
 		},
 		SubResourcePatch: f.patchStatus,
 	})

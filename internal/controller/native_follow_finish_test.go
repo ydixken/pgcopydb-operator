@@ -427,6 +427,8 @@ func TestNativePlainCloneCompletionHelperDisposal(t *testing.T) {
 	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)
 	}
+	nativeBindTestClaim(f.m, f.pvc)
+	f.replace(f.pvc)
 	canonical, err := buildNativeWorkerJob(f.m, f.pvc, f.r.RPGMigrateRunnerImage, 1)
 	if err != nil {
 		t.Fatal(err)

@@ -48,7 +48,6 @@ const (
 	nativeDispositionSlot              = "disposition_slot"
 	nativeTargetClosedKey              = "target_closed"
 	nativeDispositionPublication       = "disposition_publication"
-	nativeUnknownHelperCase            = "unknown helper"
 	nativeWorkerReplacementCase        = "changed worker incarnation"
 	nativeMissingInventoryCase         = "missing inventory"
 	nativeForeignHelperReplacementCase = "foreign replacement"
@@ -75,6 +74,9 @@ type nativeDispositionFixture struct {
 	cleanupCalled bool
 	beforeDelete  func(*batchv1.Job)
 	editCleanup   func([]byte) []byte
+	// claimDeletes counts R5 deletes of the work PVC; allowWorkerDrop admits a drop of the recorded worker.
+	claimDeletes    int
+	allowWorkerDrop bool
 }
 
 type nativeHistoricalDeletionFixture struct {
@@ -124,13 +126,16 @@ func newNativeHistoricalDeletionFixture(t *testing.T) *nativeHistoricalDeletionF
 			return errBoom
 		},
 		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-			job, ok := obj.(*batchv1.Job)
-			if !ok {
-				t.Fatal("historical deletion changed PVC retention policy")
-			}
 			options := &client.DeleteOptions{}
 			for _, option := range opts {
 				option.ApplyToDelete(options)
+			}
+			if claim, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+				return f.deleteClaim(ctx, c, claim, options, opts...)
+			}
+			job, ok := obj.(*batchv1.Job)
+			if !ok {
+				t.Fatal("historical deletion removed an unexpected object")
 			}
 			if options.Preconditions == nil || options.Preconditions.UID == nil || options.Preconditions.ResourceVersion == nil || options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
 				t.Fatal("historical deletion lost exact UID/RV foreground guards")
@@ -181,6 +186,15 @@ func newNativeHistoricalDeletionFixture(t *testing.T) *nativeHistoricalDeletionF
 		},
 	})
 	return f
+}
+
+// deleteClaim is R5's last delete: the unowned follow claim, by UID.
+func (f *nativeHistoricalDeletionFixture) deleteClaim(ctx context.Context, c client.WithWatch, claim *corev1.PersistentVolumeClaim, options *client.DeleteOptions, opts ...client.DeleteOption) error {
+	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != f.pvc.UID || claim.UID != f.pvc.UID {
+		f.t.Fatal("historical deletion removed the work PVC without its UID precondition")
+	}
+	f.deletes = append(f.deletes, claim.Name)
+	return c.Delete(ctx, claim, opts...)
 }
 
 func (f *nativeHistoricalDeletionFixture) reconcile(t *testing.T) (ctrl.Result, error) {
@@ -238,8 +252,8 @@ func TestNativeHistoricalDeletionKnownResources(t *testing.T) {
 	f.installHelper(t, compareData)
 	before := f.m.Status.DeepCopy()
 	result, err := f.reconcile(t)
-	if err != nil || result.RequeueAfter != 0 || !slices.Equal(f.deletes, []string{compareJobName(f.m, compareSchema), compareJobName(f.m, compareData), f.worker.Name}) {
-		t.Fatal("historical cleanup did not finish saved helpers before worker", result, err, f.deletes)
+	if err != nil || result.RequeueAfter != 0 || !slices.Equal(f.deletes, []string{compareJobName(f.m, compareSchema), compareJobName(f.m, compareData), f.worker.Name, f.pvc.Name}) {
+		t.Fatal("historical cleanup did not finish saved helpers before worker and the work PVC last", result, err, f.deletes)
 	}
 	live := &v1beta1.Migration{}
 	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), live); err != nil {
@@ -248,9 +262,8 @@ func TestNativeHistoricalDeletionKnownResources(t *testing.T) {
 	if !apiequality.Semantic.DeepEqual(live.Status, *before) || controllerutil.ContainsFinalizer(live, finalizerName) {
 		t.Fatal("historical cleanup changed receipt or results")
 	}
-	claim := &corev1.PersistentVolumeClaim{}
-	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.pvc), claim); err != nil || claim.UID != f.pvc.UID || !apiequality.Semantic.DeepEqual(claim.OwnerReferences, f.pvc.OwnerReferences) {
-		t.Fatal("work PVC was detached or deleted before owner GC", err)
+	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.pvc), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatal("the unowned follow work PVC outlived its finalized Migration", err)
 	}
 }
 
@@ -278,7 +291,7 @@ func TestNativeHistoricalDeletionForeignResources(t *testing.T) {
 				protected = claim
 			case "historical PVC owner":
 				claim := f.pvc.DeepCopy()
-				claim.OwnerReferences[0].UID = workerForeignIdentity
+				claim.Labels[native.WorkClaimMigrationUIDLabel] = workerForeignIdentity
 				f.replace(claim)
 				protected = claim
 			case "historical active worker":
@@ -1158,17 +1171,32 @@ func TestNativeHelperPinReset(t *testing.T) {
 	}
 }
 
+// The retry column of the C table drops an owned compare that has no pin, as a pinned one.
+func TestNativeHelperPinResetDropsUnpinnedCompare(t *testing.T) {
+	f := newNativeDispositionFixture(t, false)
+	installRecoveryCompare(t, f, compareSchema)
+	f.m.Status.NativeSchemaJobUID = ""
+	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := f.reconcile(t); err != nil {
+			t.Fatal("unpinned compare pass", i, err)
+		}
+	}
+	if live := f.current(); live.Status.Attempts != 2 {
+		t.Fatal("retry did not start after dropping the unpinned compare", live.Status.Attempts)
+	}
+	if err := f.store.Get(context.Background(), client.ObjectKey{Namespace: f.m.Namespace, Name: compareJobName(f.m, compareSchema)}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatal("unpinned compare remains", err)
+	}
+}
+
 func TestNativeHelperPinResetRefusals(t *testing.T) {
-	for _, kind := range []string{nativeForeignHelperReplacementCase, "patch conflict", nativeUnknownHelperCase} {
+	for _, kind := range []string{nativeForeignHelperReplacementCase, "patch conflict"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newNativeDispositionFixture(t, false)
 			job := installRecoveryCompare(t, f, compareSchema)
-			if kind == nativeUnknownHelperCase {
-				f.m.Status.NativeSchemaJobUID = ""
-				if err := f.store.Status().Update(context.Background(), f.m); err != nil {
-					t.Fatal(err)
-				}
-			}
 			for range 2 {
 				if err := f.reconcile(t); err != nil {
 					t.Fatal(err)
@@ -1194,7 +1222,7 @@ func TestNativeHelperPinResetRefusals(t *testing.T) {
 			if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), live); err != nil {
 				t.Fatal(err)
 			}
-			if live.Status.Attempts != 1 || live.Status.NativeJobUID != string(f.worker.UID) || kind != nativeUnknownHelperCase && live.Status.NativeSchemaJobUID != string(job.UID) {
+			if live.Status.Attempts != 1 || live.Status.NativeJobUID != string(f.worker.UID) || live.Status.NativeSchemaJobUID != string(job.UID) {
 				t.Fatal("failed retry cleared receipts")
 			}
 			if kind == nativeForeignHelperReplacementCase {
@@ -1271,6 +1299,9 @@ func TestNativeRecoveryIntentRaces(t *testing.T) {
 }
 
 func (f *nativeDispositionFixture) createRecoveryJob(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if nativeDryRun(opts) {
+		return c.Create(ctx, obj, opts...)
+	}
 
 	job, ok := obj.(*batchv1.Job)
 	if !ok {
@@ -1342,17 +1373,26 @@ func (f *nativeDispositionFixture) createRecoveryJob(ctx context.Context, c clie
 }
 
 func (f *nativeDispositionFixture) deleteRecoveryJob(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-
+	options := &client.DeleteOptions{}
+	for _, option := range opts {
+		option.ApplyToDelete(options)
+	}
+	if claim, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+		// R5: only the released deletion removes the unowned follow claim, by UID.
+		if f.m.DeletionTimestamp.IsZero() && f.current().DeletionTimestamp.IsZero() || options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != f.pvc.UID || claim.UID != f.pvc.UID {
+			f.t.Fatal("work PVC removed outside deletion or without its UID precondition")
+		}
+		f.mu.Lock()
+		f.claimDeletes++
+		f.mu.Unlock()
+		return c.Delete(ctx, obj, opts...)
+	}
 	job, ok := obj.(*batchv1.Job)
-	if !ok || job.UID == f.worker.UID {
+	if !ok || job.UID == f.worker.UID && !f.allowWorkerDrop {
 		f.t.Fatal("deleted retained original")
 	}
 	if f.beforeDelete != nil {
 		f.beforeDelete(job)
-	}
-	options := &client.DeleteOptions{}
-	for _, option := range opts {
-		option.ApplyToDelete(options)
 	}
 	actual := &batchv1.Job{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(job), actual); err != nil {
@@ -1361,8 +1401,8 @@ func (f *nativeDispositionFixture) deleteRecoveryJob(ctx context.Context, c clie
 	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != actual.UID || options.Preconditions.ResourceVersion != nil && *options.Preconditions.ResourceVersion != actual.ResourceVersion {
 		return apierrors.NewConflict(batchv1.Resource("jobs"), job.Name, errNativeDisposition)
 	}
-	if (job.Name == compareJobName(f.m, compareSchema) || job.Name == compareJobName(f.m, compareData)) && options.Preconditions.ResourceVersion == nil {
-		f.t.Fatal("helper removal lacks resource version")
+	if (job.Name == compareJobName(f.m, compareSchema) || job.Name == compareJobName(f.m, compareData)) && (options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground) {
+		f.t.Fatal("compare removal lacks foreground propagation")
 	}
 	f.mu.Lock()
 	f.deletes++
@@ -1683,7 +1723,12 @@ func TestNativeFailureAdmission(t *testing.T) {
 			if meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) || got.Status.RetryGate != nil || f.logs > 1 || (kind == probeSuspendCase || kind == nativeRecoveryDeleteCase) && f.logs != 0 {
 				t.Fatal("unadmitted, successful or retained intent classified terminal")
 			}
-			if kind != probeSuspendCase && f.patches != 0 {
+			// A deletion whose cleanup cannot read records only Blocked=True CleanupUnavailable.
+			if kind == nativeRecoveryDeleteCase {
+				if blocked := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionBlocked); f.patches != 1 || blocked == nil || blocked.Reason != v1beta1.ReasonCleanupUnavailable {
+					t.Fatal("unreadable deletion cleanup did not hold with CleanupUnavailable", f.patches, blocked)
+				}
+			} else if kind != probeSuspendCase && f.patches != 0 {
 				t.Fatal("unadmitted failure changed status")
 			}
 		})

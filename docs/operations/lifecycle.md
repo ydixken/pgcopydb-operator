@@ -88,6 +88,12 @@ With `spec.clone.dropIfExists: true`, the resume fails, and the start-over takes
 So budget two attempts for each such suspend.
 Without `dropIfExists`, the refused resume ends the Migration as `SnapshotLost`.
 
+With `spec.engine: rpgmigrate`, the suspend keeps the worker Job and sends SIGTERM to its running container instead.
+A worker whose container has not ended within the pass, or never started, is deleted in the foreground.
+When the first worker never started, its engine created no state to resume, so the operator records the next attempt as one that starts over with `--restart`.
+A running compare Job is deleted, and its pin, its `verificationProgress` item and `Verified` are cleared, so the resumed finish creates a new one.
+A compare Job that already ended and kept its pod stays pinned.
+
 > [!warning]
 > A suspend does NOT drop the replication slot of a live migration.
 > The slot continues to retain WAL on the source for the full time of the suspend, without a limit.
@@ -160,6 +166,8 @@ The operator owns the retry policy, so the Migration holds the attempt counts an
   A runner without it resumes the copy anyway, and the apply can then fail on a duplicate key or leave the target diverged.
 - A worker Job that disappears triggers the next attempt the same way.
   The `ttlSecondsAfterFinished` TTL and manual deletion both delete the Job.
+  With `spec.engine: rpgmigrate`, a gone worker Job counts against `backoffLimit` at once.
+  A failed worker whose pod is gone retries like one whose pod remains, but without a log to classify the failure.
 - A deleted pod whose network went with it is an example of a runner lost without closing its connections.
   Such a runner can leave target sessions open with their table locks.
   The [retry gate](#the-retry-gate) holds the next attempt until those sessions are gone, so the attempt does not start behind them.
@@ -281,24 +289,38 @@ A hold whose last read found sessions (`SessionsRemain`) gets one more read befo
   It then runs the cleanup Job, which drops the slot, the auto-created publication, and the target origin.
   Last, it releases the CR to garbage collection.
   Deletion therefore takes a few reconcile cycles, not milliseconds.
-- **Native live Migration that ever started** (`spec.engine: rpgmigrate`): the finalizer routes deletion through an inventory helper.
+- **Native live Migration that ever started** (`spec.engine: rpgmigrate`): the operator first sends SIGTERM to a running worker.
+  It deletes a worker that never started or does not stop within the pass, and every compare Job, running or not.
+  The finalizer then routes deletion through an inventory helper.
   The helper reads the retained work volume and connects to the source and the target.
   When the work volume records a slot or a publication, the operator runs the cleanup Job, then reads the inventory again.
   Sometimes the engine stopped before it recorded a creation.
   Then the helper must also find no slot, publication or target schema with the names of the run.
   Two such complete inventories release the Migration without a cleanup Job, so the operator changes neither database.
-  An inventory that does not run, does not complete in time, or cannot connect keeps the finalizer.
+  An inventory that does not run, does not complete in time, or cannot connect keeps the finalizer, with `Blocked=True` reason `CleanupUnavailable`.
   An inventory that finds such a resource also keeps it, and the operator tries again.
+  The work PVC of a native live Migration has no owner reference, because cleanup reads its receipts from the workdir and garbage collection must not remove it first.
+  The operator deletes the claim itself, with a UID precondition, after cleanup and just before it releases the finalizer.
+- **Foreground deletion** (`kubectl delete --cascade=foreground`, and the default prune of Argo CD): the garbage collector deletes the Jobs of the Migration first.
+  With `spec.engine: rpgmigrate`, the operator creates no helper Job while `foregroundDeletion` is a finalizer, because the garbage collector would delete it too, and reports `Blocked=True` reason `ForegroundDeletion`.
+  Once the Jobs are gone, cleanup runs on the retained work PVC and the Migration is released.
 - **Cleanup that cannot finish**: if cleanup uses all its retries, the operator emits a `CleanupFailed` warning that names the slot.
   It then releases the Migration anyway.
+  With `spec.engine: rpgmigrate`, an unreachable source keeps the finalizer instead, as the native bullet above describes.
+  A native Migration is released without cleanup only when Kubernetes makes the cleanup pod impossible.
+  That is a terminating namespace, or a work PVC that is missing, deleting or replaced.
+  The operator then writes `CleanupFailed=True` with reason `NamespaceTerminating` or `WorkVolumeLost` before it removes the finalizer.
+  The condition, a warning event, and an error line in the operator log name the slot prefix `rpgm_s_<run>_` and the publication prefix `rpgm_p_<run>_`, where `<run>` is the Migration UID without hyphens.
   This occurs, for instance, when the source is gone.
   An unreachable source should not block deletion forever.
   If the source still exists, check `pg_replication_slots` on the source.
   Then run `SELECT pg_drop_replication_slot('<slot>')` manually.
 - **Deleting the whole namespace**: we support it.
-  A terminating namespace refuses new Jobs, so cleanup cannot run there.
-  The operator emits the same `CleanupFailed` warning, which names the slot, and releases the Migration.
+  A terminating namespace refuses new Jobs, so cleanup cannot run there, and the operator releases the Migration.
   So namespace deletion never deadlocks against the finalizer.
+  The API server also refuses new events in a terminating namespace, so the `CleanupFailed` warning cannot be recorded there.
+  With `spec.engine: rpgmigrate`, the `CleanupFailed` condition and the operator log line still name the slot and publication prefixes.
+  With `spec.engine: pgcopydb`, nothing else records the slot name.
   The namespace deletion also deletes a source inside the namespace, so nothing leaks.
   A source outside the namespace (another namespace, or outside the cluster) keeps its slot and retains WAL.
   For such sources, delete the Migration first.

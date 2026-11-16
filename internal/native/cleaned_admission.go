@@ -77,7 +77,7 @@ func validateCleanedObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.P
 	if !cleanedMigrationMatches(w, m, worker, savedE) || !retryPVCMatches(w, m, pvc) || !retryHelperJobMatches(w, m, job) {
 		return nil, ErrNativeCleanedCompletionUnavailable
 	}
-	if len(pvc.OwnerReferences) != 1 || len(job.OwnerReferences) != 1 || !successfulJob(worker) || !ownedTerminalWorker(w, m, worker, workerPod) || !ownedHelperPodIdentity(w, job, pod) || !ownedHelperState(w, job, pod, completed) {
+	if len(job.OwnerReferences) != 1 || !successfulJob(worker) || !ownedTerminalWorker(w, m, worker, workerPod) || !ownedHelperPodIdentity(w, job, pod) || !ownedHelperState(w, job, pod, completed) {
 		return nil, ErrNativeCleanedCompletionUnavailable
 	}
 	template := podexec.NativeTemplateSHA256(job.Spec.Template)

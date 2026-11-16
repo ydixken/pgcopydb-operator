@@ -53,6 +53,7 @@ The mapping:
 - Everything else is `Progressing`, with the current phase in the message.
 
 Both terminal conditions are absorbing, so the health state settles one time.
+With `spec.engine: rpgmigrate` too, a `Failed` Migration ignores later suspends and spec edits until you delete it.
 A [dry run](lifecycle.md#dry-run) that passed sets `Complete=True` with reason `DryRunSucceeded`, so it also shows `Healthy`.
 If you need to distinguish the two, match that reason in the Lua.
 A verification mismatch does not set `Failed`, so a migration with `Verified=False` still reports `Healthy`.
@@ -61,6 +62,15 @@ Alert on `Verified` separately.
 A live migration at `CutoverPending` stays `Progressing` in this mapping until you approve the cutover.
 If you alert on stuck progress, give that phase its own mapping.
 Extend the Lua with the [condition reasons](../reference/conditions.md).
+
+## Pruning a live migration
+
+Argo CD prunes with foreground propagation unless the Application sets `PrunePropagationPolicy=background`.
+The prune of a live migration then waits for its cleanup, which drops the replication slot and the publication on the source.
+With `spec.engine: rpgmigrate`, the garbage collector deletes the Jobs of the Migration first, and the Migration reports `Blocked=True` reason `ForegroundDeletion` until they are gone.
+The work PVC has no owner reference, so the prune leaves it to the operator, which deletes it after cleanup.
+A prune therefore takes a few reconcile cycles, and the Migration stays `Progressing` in this health check until it is gone.
+[Deletion](lifecycle.md#deletion) describes the cases in which the operator releases the Migration without cleanup.
 
 One caveat applies to GitOps-managed migrations.
 `spec.cutover.approved: true` is a timed action.

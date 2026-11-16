@@ -30,6 +30,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -196,11 +197,12 @@ func (t *nativeTermCapture) foreign() []nativeTermRef {
 	return refs
 }
 
-// nativeTermForeign keeps the items the Migration does not own directly.
+// nativeTermForeign keeps the items the Migration does not own directly or bind as its work claim.
 func nativeTermForeign(kind string, owner types.UID, items []unstructured.Unstructured) []nativeTermRef {
 	refs := make([]nativeTermRef, 0, len(items))
 	for i := range items {
-		if slices.ContainsFunc(items[i].GetOwnerReferences(), func(r metav1.OwnerReference) bool { return r.UID == owner }) {
+		if slices.ContainsFunc(items[i].GetOwnerReferences(), func(r metav1.OwnerReference) bool { return r.UID == owner }) ||
+			kind == "PersistentVolumeClaim" && items[i].GetLabels()[native.WorkClaimMigrationUIDLabel] == string(owner) {
 			continue
 		}
 		refs = append(refs, nativeTermRef{Kind: kind, Namespace: items[i].GetNamespace(), Name: items[i].GetName(),

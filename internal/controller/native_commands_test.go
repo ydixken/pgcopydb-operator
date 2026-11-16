@@ -2,6 +2,7 @@ package controller
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -53,6 +55,31 @@ func nativeIdentityObjects() (*v1beta1.Migration, *corev1.PersistentVolumeClaim)
 		}},
 	}}
 	return m, pvc
+}
+
+// nativeDryRun reports a dry-run create, such as R9's namespace probe, which persists nothing and
+// so passes through test interceptors that refuse or count real creates.
+func nativeDryRun(opts []client.CreateOption) bool {
+	o := &client.CreateOptions{}
+	o.ApplyOptions(opts)
+	return slices.Contains(o.DryRun, metav1.DryRunAll)
+}
+
+// nativeBindTestClaim gives pvc the binding R5 requires of m's claim: a follow claim carries the
+// Migration's UID label and no owner reference; a clone-only claim has m as its controller.
+func nativeBindTestClaim(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) {
+	if !followEnabled(m) {
+		if metav1.GetControllerOf(pvc) == nil {
+			pvc.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(m, v1beta1.GroupVersion.WithKind("Migration"))}
+		}
+		delete(pvc.Labels, native.WorkClaimMigrationUIDLabel)
+		return
+	}
+	pvc.OwnerReferences = nil
+	if pvc.Labels == nil {
+		pvc.Labels = map[string]string{}
+	}
+	pvc.Labels[native.WorkClaimMigrationUIDLabel] = string(m.UID)
 }
 
 func TestNativeWorkIdentity(t *testing.T) {

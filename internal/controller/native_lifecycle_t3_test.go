@@ -11,12 +11,14 @@ import (
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -287,7 +289,7 @@ func TestNativeLostCompareReceiptRecovers(t *testing.T) {
 const (
 	t3RowNotOwned    = "not owned"
 	t3RowTerminating = "terminating"
-	t3Controlled     = "controlled"
+	t3Bound          = "bound"
 )
 
 // t3CompareRow puts the schema compare of f into one state of the C table.
@@ -499,27 +501,28 @@ func TestNativeHelperJobEventsDropped(t *testing.T) {
 }
 
 // nativeEvidenceMigration binds the work claim through nativeWorkIdentity, so it admits exactly the
-// claims that rule admits.
+// claims that rule admits. The finish fixture is a follow Migration, whose claim R5 binds by label.
 func TestNativeEvidenceMigrationBindsClaimThroughWorkIdentity(t *testing.T) {
-	for _, variant := range []string{t3Controlled, "other Migration UID", "no owner reference", "owner not controller", "other kind"} {
+	for _, variant := range []string{t3Bound, "other Migration UID", "no label", "plain owner", "controller owner"} {
 		t.Run(variant, func(t *testing.T) {
 			f := newNativeFinishFixture(t)
 			pvc := f.pvc.DeepCopy()
-			owner := &pvc.OwnerReferences[0]
+			owner := metav1.OwnerReference{APIVersion: v1beta1.GroupVersion.String(), Kind: cleanedOwnerKind, Name: f.m.Name, UID: f.m.UID}
 			switch variant {
 			case "other Migration UID":
-				owner.UID = "another-migration"
-			case "no owner reference":
-				pvc.OwnerReferences = nil
-			case "owner not controller":
-				owner.Controller = nil
-			case "other kind":
-				owner.Kind = "ConfigMap"
+				pvc.Labels[native.WorkClaimMigrationUIDLabel] = "another-migration"
+			case "no label":
+				delete(pvc.Labels, native.WorkClaimMigrationUIDLabel)
+			case "plain owner":
+				pvc.OwnerReferences = []metav1.OwnerReference{owner}
+			case "controller owner":
+				owner.Controller = ptr.To(true)
+				pvc.OwnerReferences = []metav1.OwnerReference{owner}
 			}
 			f.replace(pvc)
 			_, identityErr := nativeWorkIdentity(f.m, pvc)
 			_, err := f.r.nativeEvidenceMigration(context.Background(), f.m, f.worker, pvc)
-			if (err == nil) != (identityErr == nil) || variant == t3Controlled && err != nil || variant != t3Controlled && err == nil {
+			if (err == nil) != (identityErr == nil) || variant == t3Bound && err != nil || variant != t3Bound && err == nil {
 				t.Fatalf("evidence claim binding diverged from nativeWorkIdentity: evidence=%v identity=%v", err, identityErr)
 			}
 		})

@@ -29,7 +29,7 @@ def receipt(case):
     m = {'metadata': {'uid': 'mig-1', 'finalizers': ['pgcopydb-operator.io/cleanup']}, 'spec': {'suspend': False}, 'status': status}
     job = {'metadata': {'uid': 'job-1', 'ownerReferences': owner('Migration', 'mig-1')}, 'spec': {'suspend': False}, 'status': {'active': 1}}
     pod = {'metadata': {'uid': 'pod-1', 'ownerReferences': owner('Job', 'job-1')}, 'status': {'phase': 'Running', 'containerStatuses': [worker({'running': {}})]}}
-    pvc = {'metadata': {'uid': 'pvc-1', 'ownerReferences': owner('Migration', 'mig-1')}}
+    pvc = {'metadata': {'uid': 'pvc-1', 'labels': {M.CLAIM_LABEL: 'mig-1'}}}
     stopped = copy.deepcopy(pod)
     stopped['status'] = {'phase': 'Failed', 'containerStatuses': [worker({'terminated': {'exitCode': 4, 'finishedAt': '2026-11-13T10:00:20Z'}})]}
     intent = copy.deepcopy(m)
@@ -87,6 +87,14 @@ class NativeTermReceiptTest(unittest.TestCase):
                 r = receipt('suspend')
                 mutate(r)
                 self.assertEqual(M.check(r), [name])
+
+    def test_follow_claim_is_bound_by_label_without_owner(self):
+        for mutate in (lambda p: p['metadata'].update(ownerReferences=owner('Migration', 'mig-1')),
+                       lambda p: p['metadata'].update(labels={}),
+                       lambda p: p['metadata']['labels'].update({M.CLAIM_LABEL: 'mig-2'})):
+            r = receipt('suspend')
+            mutate(r['before']['pvc'])
+            self.assertEqual(M.check(r), ['before-ownership'])
 
     def test_natural_completion_and_kill_are_not_term(self):
         for code in (0, 137):

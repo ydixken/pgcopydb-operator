@@ -123,20 +123,29 @@ func TestNativeRetryReaderAdmitsGoneWorkerWithoutPod(t *testing.T) {
 			}
 		})
 	}
-	t.Run("owned_reader_refuses_gone_job", func(t *testing.T) {
-		api, r, w := newOwnedReaderAPI(t)
-		api.extraPods = nil
-		worker := "/jobs/" + api.fixture.m.Status.JobName
-		handler := api.Config.Handler
-		api.Config.Handler = http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
-			if strings.HasSuffix(request.URL.Path, worker) {
-				http.NotFound(out, request)
-				return
+	// Deletion inventories after a gone worker (foreground deletion removes it first), never beside its pod.
+	for _, tc := range []struct {
+		name    string
+		keepPod bool
+	}{{"owned_reader_admits_gone_job_without_pod", false}, {"owned_reader_refuses_gone_job_with_pod", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, r, w := newOwnedReaderAPI(t)
+			if !tc.keepPod {
+				api.extraPods = nil
 			}
-			handler.ServeHTTP(out, request)
+			worker := "/jobs/" + api.fixture.m.Status.JobName
+			handler := api.Config.Handler
+			api.Config.Handler = http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
+				if strings.HasSuffix(request.URL.Path, worker) {
+					http.NotFound(out, request)
+					return
+				}
+				handler.ServeHTTP(out, request)
+			})
+			got, err := r.ReadOwnedState(context.Background(), w)
+			if admitted := err == nil && got.Work() != (WorkIdentity{}); admitted == tc.keepPod {
+				t.Fatalf("inventory admitted=%v (%v) with keepPod=%v", admitted, err, tc.keepPod)
+			}
 		})
-		if got, err := r.ReadOwnedState(context.Background(), w); err == nil || got.Work() != (WorkIdentity{}) {
-			t.Fatal("inventory admitted a gone worker")
-		}
-	})
+	}
 }

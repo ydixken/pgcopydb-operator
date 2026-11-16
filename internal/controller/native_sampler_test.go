@@ -48,6 +48,7 @@ func newNativeSamplerFixtureMode(t *testing.T, follow bool) (*nativeSamplerFixtu
 	if !follow {
 		f.m.Spec.Follow.Enabled = false
 		f.m.Spec.Cutover.Approved = false
+		nativeBindTestClaim(f.m, f.pvc)
 		worker, err := buildNativeWorkerJob(f.m, f.pvc, nativeEvidenceTestImage, 1)
 		if err != nil {
 			t.Fatal(err)

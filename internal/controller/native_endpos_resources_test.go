@@ -8,6 +8,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	corev1 "k8s.io/api/core/v1"
@@ -23,6 +24,7 @@ func nativeEndposJobInputs() (*v1beta1.Migration, *corev1.PersistentVolumeClaim)
 	m.Spec.Source, m.Spec.Target = passwordMigration().Spec.Source, passwordMigration().Spec.Target
 	m.Spec.Target.PasswordSecretRef = m.Spec.Source.PasswordSecretRef.DeepCopy()
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+	nativeBindTestClaim(m, pvc)
 	m.Status.Attempts, m.Status.JobName = 1, jobName(m, 1)
 	m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: nativeEndposTestE}
 	return m, pvc
@@ -174,7 +176,10 @@ func TestNativeEndposJobRefusesInvalidBoundaryOrIdentity(t *testing.T) {
 			*n = "rpgmigrate-endpos-0123456789ABCDEF0123456789abcdef"
 		}},
 		{"foreign pvc", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _, _ *string) {
-			(*p).OwnerReferences[0].UID = workerForeignIdentity
+			(*p).Labels[native.WorkClaimMigrationUIDLabel] = workerForeignIdentity
+		}},
+		{"owner-referenced pvc", func(m **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _, _ *string) {
+			(*p).OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(*m, v1beta1.GroupVersion.WithKind("Migration"))}
 		}},
 		{"missing pvc uid", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _, _ *string) { (*p).UID = "" }},
 		{"deleting pvc", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _, _ *string) {

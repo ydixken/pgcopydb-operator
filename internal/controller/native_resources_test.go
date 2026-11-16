@@ -33,6 +33,7 @@ func nativeEvidenceJobInputs(t *testing.T) (*v1beta1.Migration, native.Execution
 	m.Labels = map[string]string{labelFeatureE2ERun: featureRunOwner}
 	m.Spec.Source, m.Spec.Target = passwordMigration().Spec.Source, passwordMigration().Spec.Target
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+	nativeBindTestClaim(m, pvc)
 	m.Status.Attempts, m.Status.JobName = 1, jobName(m, 1)
 	work, err := nativeWorkIdentity(m, pvc)
 	if err != nil {
@@ -275,6 +276,7 @@ func TestNativeWorkerJobProgram(t *testing.T) {
 	m.Spec.Runner.NodeSelector = map[string]string{"worker-test-pool": "native"}
 	m.Spec.Runner.Tolerations = []corev1.Toleration{{Key: "worker-test", Operator: corev1.TolerationOpExists}}
 	m.Spec.Runner.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}}
+	nativeBindTestClaim(m, pvc)
 	before, beforePVC := m.DeepCopy(), pvc.DeepCopy()
 	job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
 	if err != nil {
@@ -453,6 +455,7 @@ func TestNativeWorkerJobProfiles(t *testing.T) {
 			if tc.configure != nil {
 				tc.configure(m)
 			}
+			nativeBindTestClaim(m, pvc)
 			job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, tc.attempt)
 			if err != nil {
 				t.Fatal(err)
@@ -569,6 +572,7 @@ func TestNativeWorkerJobGolden(t *testing.T) {
 			narrowNativeWorker(m)
 			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
 			m.Spec.Target = target
+			nativeBindTestClaim(m, pvc)
 			job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
 			if err != nil {
 				t.Fatal(err)
