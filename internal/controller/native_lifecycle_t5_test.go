@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -147,8 +149,7 @@ func t5Worker(t *testing.T, f *nativeDispositionFixture, state string) {
 	}
 }
 
-func t5WorkVolumeLost(t *testing.T, m *v1beta1.Migration) bool {
-	t.Helper()
+func t5WorkVolumeLost(m *v1beta1.Migration) bool {
 	failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 	return m.Status.Phase == v1beta1.PhaseFailed && failed != nil && failed.Status == metav1.ConditionTrue && failed.Reason == v1beta1.ReasonWorkVolumeLost &&
 		strings.Contains(failed.Message, workPVCName(m))
@@ -165,18 +166,18 @@ func TestNativeWorkVolumeLostFailsOutsideDeletion(t *testing.T) {
 				w := t4Wrap(t, f)
 				t5Worker(t, f, worker)
 				t5LoseClaim(t, f, claim)
-				for pass := 0; pass < 4 && !t5WorkVolumeLost(t, f.current()); pass++ {
+				for pass := 0; pass < 4 && !t5WorkVolumeLost(f.current()); pass++ {
 					if _, err := f.dispatch(t); err != nil {
 						t.Fatalf("pass %d: %v", pass, err)
 					}
 					// R1: Failed is written only once the worker has no engine left.
 					live := &batchv1.Job{}
-					if t5WorkVolumeLost(t, f.current()) && f.store.Get(context.Background(), client.ObjectKeyFromObject(f.worker), live) == nil && !nativeWorkerEnded(live) {
+					if t5WorkVolumeLost(f.current()) && f.store.Get(context.Background(), client.ObjectKeyFromObject(f.worker), live) == nil && !nativeWorkerEnded(live) {
 						t.Fatalf("pass %d failed the Migration while worker %s still runs", pass, live.Name)
 					}
 				}
 				got := f.current()
-				if !t5WorkVolumeLost(t, got) || f.workerCreates != 0 || f.cleanupCalled || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) {
+				if !t5WorkVolumeLost(got) || f.workerCreates != 0 || f.cleanupCalled || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) {
 					t.Fatalf("lost claim outside deletion: phase=%s failed=%+v creates=%d cleanup=%v", got.Status.Phase, meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionFailed), f.workerCreates, f.cleanupCalled)
 				}
 				if (worker == t5RunningWorker || worker == t5ModifiedWorker || worker == t5PendingWorker) && !slices.Contains(w.order, "delete "+f.worker.Name) {
@@ -197,7 +198,7 @@ func TestNativeWorkVolumeLostFailsOutsideDeletion(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if got := f.current(); !t5WorkVolumeLost(t, got) || f.patches != patches || f.workerCreates != 0 {
+				if got := f.current(); !t5WorkVolumeLost(got) || f.patches != patches || f.workerCreates != 0 {
 					t.Fatalf("Failed did not absorb: phase=%s patches=%d creates=%d", got.Status.Phase, f.patches-patches, f.workerCreates)
 				}
 				t4Delete(t, f)
@@ -238,7 +239,7 @@ func TestNativeWorkVolumeLostWaitsForWorkerPod(t *testing.T) {
 	if err := f.store.Delete(context.Background(), orphan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.dispatch(t); err != nil || !t5WorkVolumeLost(t, f.current()) || t5Blocked(f.current()) != nil {
+	if _, err := f.dispatch(t); err != nil || !t5WorkVolumeLost(f.current()) || t5Blocked(f.current()) != nil {
 		t.Fatalf("no WorkVolumeLost once the pod ended: err=%v phase=%s blocked=%+v", err, f.current().Status.Phase, t5Blocked(f.current()))
 	}
 }
@@ -644,3 +645,49 @@ func TestNativeSynchronousCommitEditSuspends(t *testing.T) {
 		t.Fatalf("suspend with the field set: err=%v phase=%s blocked=%+v", err, f.current().Status.Phase, t5Blocked(f.current()))
 	}
 }
+
+// The API server, not the fake client, validates what the T5 rules write: nativeFreshAttempt moved on,
+// removed and lowered (minimum 2, no transition rule), the Blocked reasons, and Failed=WorkVolumeLost.
+var _ = Describe("native T5 status writes on the API server", func() {
+	It("admits each write and stores it as written", func(ctx SpecContext) {
+		r := &MigrationReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(10)}
+		m := validMigration("native-t5-status")
+		m.Spec.Engine, m.Spec.Follow = v1beta1.MigrationEngineRPGMigrate, &v1beta1.FollowOptions{Enabled: true}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), m) })
+		m.Status = v1beta1.MigrationStatus{Phase: v1beta1.PhasePending, NativeRunnerImage: qualifiedRunnerARM64}
+		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
+		patch := func(change func(*v1beta1.Migration)) {
+			GinkgoHelper()
+			desired := m.DeepCopy()
+			change(desired)
+			Expect(k8sClient.Status().Patch(ctx, desired, client.MergeFromWithOptions(m, client.MergeFromWithOptimisticLock{}))).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), m)).To(Succeed())
+		}
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: m.Namespace, Name: jobName(m, 1), UID: "5a3c1e2d-7b4f-4c6a-9e8d-1f2a3b4c5d6e"}}
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{UID: "5a3c1e2d-7b4f-4c6a-9e8d-1f2a3b4c5d6f"}}
+		patch(func(d *v1beta1.Migration) {
+			Expect(r.applyNativeAttemptReceipt(d, job, pvc, strings.Repeat("a", 64))).To(BeTrue())
+		})
+		Expect(m.Status.Attempts).To(Equal(int32(1)))
+		Expect(m.Status.NativeFreshAttempt).To(Equal(int32(2)))
+		patch(markNativeWorkerStarted)
+		Expect(m.Status.NativeFreshAttempt).To(BeZero())
+		patch(func(d *v1beta1.Migration) { d.Status.Attempts, d.Status.NativeFreshAttempt = 3, 4 })
+		patch(markNativeWorkerStarted)
+		Expect(m.Status.NativeFreshAttempt).To(Equal(int32(3)))
+		for _, reason := range []string{v1beta1.ReasonCompareFailed, v1beta1.ReasonSynchronousCommitUnsupported} {
+			_, _, err := r.holdNative(ctx, m, m.DeepCopy(), reason, "held by "+reason)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), m)).To(Succeed())
+			Expect(t5Blocked(m)).NotTo(BeNil())
+			Expect(t5Blocked(m).Reason).To(Equal(reason))
+		}
+		m.Status.JobName, m.Status.NativeJobUID = jobName(m, 3), "5a3c1e2d-7b4f-4c6a-9e8d-1f2a3b4c5d70"
+		_, _, err := r.failNativeWorkVolumeLost(ctx, m, m.DeepCopy(), nativeMissingWorker(m))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), m)).To(Succeed())
+		Expect(t5WorkVolumeLost(m)).To(BeTrue())
+		Expect(t5Blocked(m)).To(BeNil())
+	})
+})
