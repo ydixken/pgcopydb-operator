@@ -54,9 +54,6 @@ jobs:
           - {pair: "16:18", slug: 16-18, case: live-writer, migration: e2e-follow-load,
              spec: "Migration loses no committed transaction when the source is written throughout"}
     env:
-      KUBECONFIG: ${{ github.workspace }}/../kind.kubeconfig
-      ART: ${{ github.workspace }}/../smoke-artifact
-      PRIV: ${{ github.workspace }}/../smoke-private
       PAIR: ${{ matrix.pair }}
       CASE: ${{ matrix.case }}
       MIGRATION: ${{ matrix.migration }}
@@ -73,6 +70,8 @@ jobs:
       - name: Record the runner and its Docker daemon
         run: |
           set -eu
+          ART="$RUNNER_TEMP/smoke-artifact" PRIV="$RUNNER_TEMP/smoke-private"
+          printf 'ART=%s\nPRIV=%s\nKUBECONFIG=%s\n' "$ART" "$PRIV" "$RUNNER_TEMP/kind.kubeconfig" >> "$GITHUB_ENV"
           mkdir -p "$ART/raw/logs" "$PRIV"
           chmod 700 "$PRIV"
           test "$(uname -m)" = x86_64
@@ -256,7 +255,7 @@ jobs:
           set -o pipefail
           "$RUNNER_TEMP/e2e.test" -test.run '^TestE2E$' -test.v -test.timeout 55m \
             -ginkgo.v -ginkgo.timeout=50m -ginkgo.label-filter=native -ginkgo.fail-on-empty \
-            -ginkgo.focus="^${SPEC}\$" \
+            -ginkgo.focus="^pgcopydb-operator e2e suite ${SPEC}\$" \
             -ginkgo.json-report="$ART/ginkgo-report.json" -ginkgo.junit-report="$ART/junit.xml" \
             2>&1 | tee "$ART/raw/suite.log"
 
@@ -438,5 +437,5 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: native-amd64-smoke-${{ matrix.case }}-${{ matrix.slug }}
-          path: ${{ github.workspace }}/../smoke-artifact
+          path: ${{ runner.temp }}/smoke-artifact
           retention-days: 14
