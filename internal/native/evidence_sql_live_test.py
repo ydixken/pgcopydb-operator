@@ -84,10 +84,11 @@ class EvidenceSQLLive(unittest.TestCase):
         self.patch = mock_identity()
         self.addCleanup(self.patch)
 
-    def state(self, cleanup=None):
+    def state(self, cleanup=None, extra=()):
         oid = lambda sql: int(self.db.scalar(sql))
-        tables = [dict(source_oid=oid("SELECT 'public.%s'::regclass::oid;" % t), name=dict(schema='public', table=t), all_columns=cols)
-                  for t, cols in (('t1', ['id', 'v']), ('t2', ['id', 'w']))]
+        regclass = lambda schema, table: oid('SELECT %s::regclass::oid;' % literal('"%s"."%s"' % (schema, table)))
+        tables = [dict(source_oid=regclass(schema, t), name=dict(schema=schema, table=t), **columns)
+                  for schema, t, columns in [('public', t, dict(all_columns=cols, writable_columns=cols)) for t, cols in (('t1', ['id', 'v']), ('t2', ['id', 'w']))] + list(extra)]
         plan = dict(source=dict(identity=dict(database_oid=oid('SELECT oid FROM pg_database WHERE datname=current_database();'))), tables=tables)
         pub = dict(name=self.pub, oid=oid("SELECT oid FROM pg_publication WHERE pubname='%s';" % self.pub),
                    owner_oid=oid("SELECT pubowner FROM pg_publication WHERE pubname='%s';" % self.pub))
@@ -138,6 +139,32 @@ class EvidenceSQLLive(unittest.TestCase):
         self.assertRefusedAt(self.inventory(state), 3)
         psql(self.db.uri, "SELECT pg_catalog.pg_create_physical_replication_slot('%s');" % self.slot)
         self.assertRefusedAt(self.inventory(self.state()), 1)
+
+    def test_InventoryGeneratedColumnMembers(self):
+        # The engine's member rule (E4): attnames are the non-generated columns in attnum order, no row filter, no column list.
+        # The quoted names cover the member OID lookup.
+        g = '"Gen S"."G.x"'
+        virtual = ', v int GENERATED ALWAYS AS (a + 1) VIRTUAL' if self.major == 18 else ''
+        psql(self.db.uri, 'CREATE SCHEMA "Gen S"; CREATE TABLE %s(id int PRIMARY KEY, a int, b int, s int GENERATED ALWAYS AS (a * 2) STORED%s); ALTER TABLE %s DROP COLUMN b; ALTER TABLE %s ADD COLUMN c int; ALTER PUBLICATION %s ADD TABLE %s;' % (g, virtual, g, g, self.pub, g))
+        generated = dict(all_columns=['id', 'a', 's'] + (['v'] if self.major == 18 else []) + ['c'], writable_columns=['id', 'a', 'c'])
+        state = lambda **columns: self.state(extra=[('Gen S', 'G.x', dict(generated, **columns))])
+        self.assertEqual(self.inventory(state())[0], 'pinned')
+        for columns in (dict(writable_columns=generated['all_columns']), dict(writable_columns=['a', 'id', 'c']), dict(all_columns=generated['writable_columns']), dict(all_columns=['id', 'a', 'c', 's'])):
+            with self.subTest(plan=columns):
+                self.assertRefusedAt(self.inventory(state(**columns)), 3)
+        members = [g + ' WHERE (id > 0)', g + ' (id, a, c)'] + ([g + ' (id, a, s, c)'] if self.major == 18 else [])
+        psql(self.db.uri, 'CREATE TABLE public.f(id int PRIMARY KEY);')
+        for member in members + [g + ', public.f']:
+            with self.subTest(member=member):
+                psql(self.db.uri, 'ALTER PUBLICATION %s SET TABLE public.t1, public.t2, %s;' % (self.pub, member))
+                self.assertRefusedAt(self.inventory(state()), 3)
+                psql(self.db.uri, 'ALTER PUBLICATION %s SET TABLE public.t1, public.t2, %s;' % (self.pub, g))
+                self.assertEqual(self.inventory(state())[0], 'pinned')
+        if self.major == 18:
+            psql(self.db.uri, 'ALTER PUBLICATION %s SET (publish_generated_columns = stored);' % self.pub)
+            self.assertRefusedAt(self.inventory(state()), 2)
+            psql(self.db.uri, 'ALTER PUBLICATION %s SET (publish_generated_columns = none);' % self.pub)
+            self.assertEqual(self.inventory(state())[0], 'pinned')
 
     def test_RetryCensusCountsEngineSessions(self):
         census = lambda application='pgm-retry-gate': SCOPE['target_retry_census'](LiveSession(self.db.uri, application))
