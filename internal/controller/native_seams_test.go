@@ -1,8 +1,8 @@
 package controller
 
-// TestNativeSeams drives one native follow migration and one killed retry through the
-// reconciler against real PostgreSQL and the qualified runner, cluster-free. Each helper
-// and exec program runs from the operator's own builders against engine-written state.
+// TestNativeSeams drives a native follow migration, a killed retry and three follow migrations
+// whose cleanup crashes through the reconciler against real PostgreSQL and the qualified runner,
+// cluster-free. Each helper and exec program runs from the operator's own builders against engine-written state.
 
 import (
 	"bytes"
@@ -140,6 +140,10 @@ type seamsHarness struct {
 	verdicts []seamsVerdict
 	// namedLive holds each Migration whose streaming engine the session-name census saw.
 	namedLive map[string]bool
+	// crashMu guards the crashes armed for the next cleanup Jobs and the count of cleanup Jobs started.
+	crashMu       sync.Mutex
+	crashes       []*seamsCrash
+	cleanupStarts int
 }
 
 // TestSeamsTargetGrant pins the harness to the native grant set of prerequisites.md.
@@ -228,6 +232,7 @@ func TestNativeSeams(t *testing.T) {
 	h.prepare()
 	h.runFollow()
 	h.runRetry()
+	h.runRejoin()
 	h.report()
 }
 
@@ -254,7 +259,7 @@ func (h *seamsHarness) prepare() {
 		}
 	}
 	h.prepareSource(ctx)
-	for _, db := range []string{seamsAppDatabase, seamsRetryDB} {
+	for _, db := range append([]string{seamsAppDatabase, seamsRetryDB}, seamsRejoinDatabases()...) {
 		h.prepareTarget(ctx, db)
 	}
 	for _, side := range []string{seamsSourceSide, seamsTargetSide} {
@@ -278,6 +283,7 @@ func (h *seamsHarness) prepare() {
 		}
 	}()
 	c := h.cluster
+	c.onStart = h.cleanupStarted
 	h.r = &MigrationReconciler{Client: c.api, APIReader: c.reader, Scheme: c.scheme, Recorder: recorder, RPGMigrateRunnerImage: h.images.runner,
 		NativePreflight: c.exec, NativeStop: c.exec, NativeEvidence: native.NewReader(c.reader, c.exec), NativeControl: native.NewClient(c.exec), NativeJobs: c.exec, Sampler: sampler}
 	for started := false; !started; time.Sleep(10 * time.Millisecond) {
@@ -607,93 +613,115 @@ func (h *seamsHarness) runFollow() {
 	const name = "seams-follow"
 	m := h.newMigration(name, seamsAppDatabase)
 	run := runIDFor(m)
-	writer := h.startWriter(seamsLiveMarker)
+	if !h.streamAndDrain(ctx, "follow", seamsLiveMarker, m, func() {
+		h.check("follow/session-names", seamsSessionNamesProgram, func() (string, error) { return h.sessionNames(ctx, name, seamsAppDatabase) })
+		h.check("follow/lag", "source exec: active_lag observation", func() (string, error) {
+			w, o, err := h.execution(ctx, name)
+			if err != nil {
+				return "", err
+			}
+			lag, err := h.r.NativeControl.SampleLag(ctx, o.m, w)
+			if err != nil {
+				return "", err
+			}
+			value := lag.LagBytes()
+			if value == nil {
+				return "", errors.New("lag sample carries no lag")
+			}
+			return fmt.Sprintf("lag %d bytes", *value), nil
+		})
+		h.check("follow/lag-status", "reconcile: sampler publishes lag and CaughtUp", func() (string, error) {
+			return h.reconcileUntil(ctx, name, 2*time.Minute, func(o seamsObjects) bool {
+				c := apimeta.FindStatusCondition(o.m.Status.Conditions, v1beta1.ConditionCaughtUp)
+				return o.m.Status.Replication != nil && o.m.Status.Replication.LagBytes != nil && c != nil && c.Reason != "NativeLagUnknown"
+			})
+		})
+		h.check("follow/source-head", "source exec: source_head observation", func() (string, error) {
+			w, o, err := h.execution(ctx, name)
+			if err != nil {
+				return "", err
+			}
+			end, err := h.r.NativeControl.CurrentEndLSN(ctx, o.m, w)
+			return "source head " + end, err
+		})
+	}) {
+		return
+	}
+	// Finish runs straight from the drain, as the manager does: its first pass probes cleaned
+	// completion before cleanup, so the refused probe and its closure run against real Jobs.
+	h.check("follow/finish", "reconcile: finishNativeFollow to Completed", func() (string, error) { return h.reconcileCompleted(ctx, name) })
+	h.check("follow/helpers", "API store: no state or cleanup helper Job outlives Completed", func() (string, error) { return h.expectNoStateHelpers(ctx, name) })
+	h.check("follow/verification", "compare verdicts that finishNativeFollow recorded", func() (string, error) { return h.expectVerification(ctx, name) })
+	h.expectCleaned(ctx, run, seamsAppDatabase, "follow")
+	h.deleteMigration(ctx, name, "follow")
+}
+
+// streamAndDrain creates m and takes it under a live writer to a drained worker that still owns its
+// slot, publication and bookkeeping schema; during runs while the worker streams. False: no worker started.
+func (h *seamsHarness) streamAndDrain(ctx context.Context, prefix, marker string, m *v1beta1.Migration, during func()) bool {
+	name, database, run := m.Name, m.Spec.Target.Database, runIDFor(m)
+	writer := h.startWriter(marker)
 	defer func() { _, _ = writer.halt() }()
 	if err := h.cluster.api.Create(ctx, m); err != nil {
 		h.t.Fatal(err)
 	}
-	if !h.check("follow/start", "version and preflight Jobs, work claim, worker Job", func() (string, error) {
+	if !h.check(prefix+"/start", "version and preflight Jobs, work claim, worker Job", func() (string, error) {
 		return h.reconcileUntil(ctx, name, 6*time.Minute, func(o seamsObjects) bool { return o.m != nil && seamsWorkerRunning(o) })
 	}) {
-		return
+		return false
 	}
-	h.check("follow/streaming", "control exec: rpgmigrate list progress", func() (string, error) { return h.probeStreaming(ctx, name) })
-	h.check("follow/session-names", seamsSessionNamesProgram, func() (string, error) { return h.sessionNames(ctx, name, seamsAppDatabase) })
-	h.check("follow/lag", "source exec: active_lag observation", func() (string, error) {
-		w, o, err := h.execution(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		lag, err := h.r.NativeControl.SampleLag(ctx, o.m, w)
-		if err != nil {
-			return "", err
-		}
-		value := lag.LagBytes()
-		if value == nil {
-			return "", errors.New("lag sample carries no lag")
-		}
-		return fmt.Sprintf("lag %d bytes", *value), nil
-	})
-	h.check("follow/lag-status", "reconcile: sampler publishes lag and CaughtUp", func() (string, error) {
-		return h.reconcileUntil(ctx, name, 2*time.Minute, func(o seamsObjects) bool {
-			c := apimeta.FindStatusCondition(o.m.Status.Conditions, v1beta1.ConditionCaughtUp)
-			return o.m.Status.Replication != nil && o.m.Status.Replication.LagBytes != nil && c != nil && c.Reason != "NativeLagUnknown"
-		})
-	})
-	h.check("follow/source-head", "source exec: source_head observation", func() (string, error) {
-		w, o, err := h.execution(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		end, err := h.r.NativeControl.CurrentEndLSN(ctx, o.m, w)
-		return "source head " + end, err
-	})
+	h.check(prefix+"/streaming", "control exec: rpgmigrate list progress", func() (string, error) { return h.probeStreaming(ctx, name) })
+	during()
 	last, werr := writer.halt()
-	h.check("follow/writer", "live writer on the source", func() (string, error) {
+	h.check(prefix+"/writer", "live writer on the source", func() (string, error) {
 		if werr != nil || last == 0 {
 			return "", fmt.Errorf("writer committed %d rows: %v", last, werr)
 		}
-		return fmt.Sprintf("%d rows committed", last), h.waitTarget(ctx, seamsAppDatabase, fmt.Sprintf("%s%d", seamsLiveMarker, last))
+		return fmt.Sprintf("%d rows committed", last), h.waitTarget(ctx, database, fmt.Sprintf("%s%d", marker, last))
 	})
 	h.approve(ctx, name)
-	if !h.check("follow/endpos", "reconcile: cutover saves E from source_head", func() (string, error) {
+	if !h.check(prefix+"/endpos", "reconcile: cutover saves E from source_head", func() (string, error) {
 		return h.reconcileUntil(ctx, name, 2*time.Minute, func(o seamsObjects) bool { return nativeControlEnd(o.m) != "" })
 	}) {
 		h.saveEndFallback(ctx, name)
 	}
-	h.check("follow/drain", "reconcile: control exec sets endpos, the worker drains and exits 0", func() (string, error) {
+	h.check(prefix+"/drain", "reconcile: control exec sets endpos, the worker drains and exits 0", func() (string, error) {
 		return h.reconcileUntil(ctx, name, 4*time.Minute, func(o seamsObjects) bool { return o.worker != nil && nativeEvidenceWorkerComplete(o.worker) })
 	})
-	h.check("follow/owned", "source and target SQL: this run's slot, publication and bookkeeping schema", func() (string, error) {
-		return h.expectOwned(ctx, run, seamsAppDatabase)
+	h.check(prefix+"/owned", "source and target SQL: this run's slot, publication and bookkeeping schema", func() (string, error) {
+		return h.expectOwned(ctx, run, database)
 	})
-	// Finish runs straight from the drain, as the manager does: its first pass probes cleaned
-	// completion before cleanup, so the refused probe and its closure run against real Jobs.
-	h.check("follow/finish", "reconcile: finishNativeFollow to Completed", func() (string, error) {
-		return h.reconcileUntil(ctx, name, 6*time.Minute, func(o seamsObjects) bool {
-			c := apimeta.FindStatusCondition(o.m.Status.Conditions, v1beta1.ConditionCutoverComplete)
-			return o.m.Status.Phase == v1beta1.PhaseCompleted && c != nil && c.Reason == "NativeDrainConfirmed"
-		})
-	})
-	h.check("follow/helpers", "API store: no state or cleanup helper Job outlives Completed", func() (string, error) { return h.expectNoStateHelpers(ctx, name) })
-	h.check("follow/verification", "compare verdicts that finishNativeFollow recorded", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		var checks []string
-		for _, result := range o.m.Status.Verification {
-			checks = append(checks, result.Check)
-		}
-		slices.Sort(checks)
-		out, err := h.verdictOf(ctx, o.m)
-		if err == nil && !slices.Equal(checks, []string{compareData, compareSchema}) {
-			err = fmt.Errorf("recorded checks %v, want data and schema", checks)
-		}
-		return out, err
-	})
-	h.expectCleaned(ctx, run, seamsAppDatabase, "follow")
-	h.deleteMigration(ctx, name, "follow")
+	return true
+}
+
+func (h *seamsHarness) reconcileCompleted(ctx context.Context, name string) (string, error) {
+	return h.reconcileUntil(ctx, name, 6*time.Minute, func(o seamsObjects) bool { return seamsCompleted(o) })
+}
+
+func seamsCompleted(o seamsObjects) bool {
+	if o.m == nil {
+		return false
+	}
+	c := apimeta.FindStatusCondition(o.m.Status.Conditions, v1beta1.ConditionCutoverComplete)
+	return o.m.Status.Phase == v1beta1.PhaseCompleted && c != nil && c.Reason == "NativeDrainConfirmed"
+}
+
+// expectVerification requires the schema and data verdicts that finishNativeFollow recorded to match.
+func (h *seamsHarness) expectVerification(ctx context.Context, name string) (string, error) {
+	o, err := h.objects(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	var checks []string
+	for _, result := range o.m.Status.Verification {
+		checks = append(checks, result.Check)
+	}
+	slices.Sort(checks)
+	out, err := h.verdictOf(ctx, o.m)
+	if err == nil && !slices.Equal(checks, []string{compareData, compareSchema}) {
+		err = fmt.Errorf("recorded checks %v, want data and schema", checks)
+	}
+	return out, err
 }
 
 const seamsSessionNamesProgram = "SQL: engine session names and the retry-gate census while streaming"
@@ -932,8 +960,9 @@ func (h *seamsHarness) expectOwned(ctx context.Context, run, database string) (s
 	return fmt.Sprintf("slot %s, publication %s, target _rpgmigrate_%s present", slot, pub, run), nil
 }
 
-// expectNoStateHelpers requires that every inventory, cleaned, rejoin, evidence and cleanup Job was
-// disposed; the retained worker Job in the same listing proves the listing saw this Migration's Jobs.
+// expectNoStateHelpers requires that every inventory, cleaned, rejoin, endpos, evidence and cleanup Job of
+// this Migration was disposed; the retained worker Job in the same listing proves the listing saw its Jobs.
+// The stand-in store has no garbage collector, so Jobs of deleted Migrations stay listed and are skipped.
 func (h *seamsHarness) expectNoStateHelpers(ctx context.Context, name string) (string, error) {
 	o, err := h.objects(ctx, name)
 	if err != nil || o.worker == nil {
@@ -946,9 +975,12 @@ func (h *seamsHarness) expectNoStateHelpers(ctx context.Context, name string) (s
 	var left, all []string
 	worker := false
 	for _, job := range jobs.Items {
+		if !slices.ContainsFunc(job.OwnerReferences, func(ref metav1.OwnerReference) bool { return ref.UID == o.m.UID }) {
+			continue
+		}
 		all = append(all, job.Name)
 		worker = worker || job.UID == o.worker.UID
-		for _, prefix := range []string{nativeInventoryJobPrefix, nativeCleanedJobPrefix, nativeCleanupRejoinJobPrefix, "rpgmigrate-evidence-", "rpgmigrate-cleanup-"} {
+		for _, prefix := range []string{nativeInventoryJobPrefix, nativeCleanedJobPrefix, nativeCleanupRejoinJobPrefix, "rpgmigrate-endpos-", "rpgmigrate-evidence-", "rpgmigrate-cleanup-"} {
 			if strings.HasPrefix(job.Name, prefix) {
 				left = append(left, job.Name)
 				break
@@ -1022,7 +1054,7 @@ func (h *seamsHarness) runRetry() {
 		}
 		wait, stop := context.WithTimeout(ctx, time.Minute)
 		defer stop()
-		_, err = h.cluster.waitJob(wait, o.m.Status.JobName, nativeRecoveryWorkerFailed)
+		err = h.cluster.waitJob(wait, o.m.Status.JobName, nativeRecoveryWorkerFailed)
 		return "worker Job failed", err
 	})
 	h.check("retry/failure-log", "failed worker log read", func() (string, error) {

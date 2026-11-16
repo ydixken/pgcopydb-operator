@@ -188,6 +188,10 @@ func (r *MigrationReconciler) readNativeFollowTargetCompletion(ctx context.Conte
 	}
 	observation, err := r.readNativeFollowCompletion(ctx, m, worker, pvc, clone, capture.raw)
 	if err != nil || observation == nil {
+		// The acknowledgment is already read, so a refused probe disposes its unchanged endpos helper.
+		if r.nativeEndposHelperUnchanged(ctx, capture) {
+			_ = r.nativePreflightCleanup(ctx, m, capture.created, capture.pod)
+		}
 		return nil, errNativeFollowCompletion
 	}
 	if _, _, err := r.nativeFollowTerminalCurrent(ctx, m, worker, pvc, capture.original); err != nil || ctx.Err() != nil || !r.nativeEndposHelperUnchanged(ctx, capture) {

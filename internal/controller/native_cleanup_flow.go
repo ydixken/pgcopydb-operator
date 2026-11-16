@@ -189,6 +189,14 @@ func (r *MigrationReconciler) nativeStateHelperClosed(ctx context.Context, m *v1
 	return pod, nil
 }
 
+// disposeRefusedNativeHelper deletes a helper only after it closed Failed (decision ag); any other
+// end, a change or a timeout keeps it.
+func (r *MigrationReconciler) disposeRefusedNativeHelper(ctx context.Context, m *v1beta1.Migration, capture *nativeStateHelper) {
+	if pod, err := r.nativeStateHelperClosed(ctx, m, capture, false); err == nil {
+		_ = r.nativePreflightCleanup(ctx, m, capture.created, pod)
+	}
+}
+
 func (r *MigrationReconciler) readNativeOwnedInventory(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (native.AdmittedOwnedState, error) {
 	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
 	if err != nil {
@@ -312,6 +320,10 @@ func (r *MigrationReconciler) captureNativeCleanupReport(ctx context.Context, m 
 	binding := podexec.NativeContainerBinding{ContainerName: workerContainer, ImageID: runnerImageFor(m, r.RPGMigrateRunnerImage), TemplateSHA256: podexec.NativeTemplateSHA256(created.Spec.Template), ExecutionSHA256: podexec.NativeExecutionSHA256(created.Spec.Template)}
 	observed, pod, err := r.nativeEndposHelperTerminal(ctx, m, worker, pvc, original, expected, created, &binding)
 	if err != nil {
+		// An engine that died leaves no report to read; its Job goes once it is seen Failed.
+		if dead, err := r.nativePreflightPod(ctx, created); err == nil && dead != nil && len(dead.Status.ContainerStatuses) == 1 {
+			r.disposeRefusedNativeHelper(ctx, m, &nativeStateHelper{expected: expected, created: created, pod: dead, data: native.ExecutionData{PlatformImageID: binding.ImageID, Container: podexec.NativeContainerBinding{ContainerID: dead.Status.ContainerStatuses[0].ContainerID}}})
+		}
 		return nil, errNativeCleanupFlow
 	}
 	output, err := r.NativeJobs.JobCleanupNative(ctx, m.Namespace, created.UID, binding)

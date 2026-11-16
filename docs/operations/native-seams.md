@@ -12,7 +12,7 @@ A fake API store holds the Migration, the claim, the Jobs and the Pods.
 An HTTP endpoint answers the podexec transport, so the reconciler uses its own exec and log transport.
 Podman runs each Pod from the Job that the operator's builder made.
 
-The harness does these runs:
+The harness does these runs, in order:
 
 1. A follow run under a live writer.
    It reconciles to a running worker and waits for the streaming phase.
@@ -25,6 +25,28 @@ The harness does these runs:
    It censuses the sessions while the worker streams, kills the worker with SIGKILL, reads the failed worker log and the retry gate, and reconciles to attempt 2.
    The retry gate step fails unless the census of the same run passed, because only then does the gate's count of zero show that the killed engine's sessions ended.
    Then it deletes the Migration while attempt 2 streams, so the disposition stops the worker and runs the deletion inventory and cleanup.
+
+3. Three rejoin runs, one per partial cleanup a crash can leave.
+   Each drains a follow migration as the follow run does, then reconciles toward `Completed` until the engine's cleanup Job reaches a trap on the source.
+   The harness then kills the cleanup container with SIGKILL and releases the trap.
+   It reads the cleanup flags from the engine manifest on the work claim and the slot and publication from the source.
+   Then it reconciles to `Completed`, and requires an admitted rejoin helper and a resumed cleanup Job on the way.
+
+The crash points and the state each leaves:
+
+- `rejoin-00` crashes twice.
+  First it kills the engine while its inspection waits on a lock on a published table, so no cleanup intent is written.
+  The next finish pass takes the ordinary completion route, and its cleanup Job is killed after the intent is durable but before the slot is removed: flags `false,false`, slot and publication present.
+  The trap is a lock on `pg_database`, which the slot removal's source check reads next.
+- `rejoin-10` kills the engine while `DROP PUBLICATION` waits on a lock on the publication: flags `true,false`, the publication present.
+  Before the finish, the harness creates a slot of the removed slot's name.
+  The `reappeared` step requires that the rejoin helper refuses it twice, that no cleanup Job starts and that the Migration does not complete.
+  Then it drops that slot again.
+- `rejoin-10-dropped` sets a synchronous standby that never connects, so the committed `DROP PUBLICATION` waits.
+  It kills the engine in that wait and then removes the standby setting, which releases the commit: flags `true,false`, the publication absent.
+
+Each `crash-*` step also requires that every rejoin helper before the crash refused, because no cleanup intent existed yet.
+The engine removes the slot before the publication, so no crash leaves the flags `false,true`; the rejoin route admits them, but no run covers them.
 
 The session census is the `session-names` step of each run.
 It requires a walsender named `rpgmigrate[<pid>] receive` on the source and a client backend named `rpgmigrate[<pid>] apply` on the target, the names of `docs/native-protocol.md` in the engine repository.

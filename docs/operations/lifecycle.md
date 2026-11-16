@@ -9,6 +9,9 @@ Callers MUST retain each helper until checked result capture and the complete pr
 Retain schema and data verification helpers until the caller durably records fresh final verification.
 After that point, callers MUST either delete the exact recorded Job UID or restore the configured TTL.
 Clear a helper UID pin only after its caller deletes the known terminal Job and an uncached read returns `NotFound`.
+A finish pass that refuses also deletes the helpers it made, once each is closed.
+That is an endpos helper whose acknowledgment it read, and an evidence or cleanup helper whose Job ended Failed.
+A helper that ends any other way, changes or is still running stays for inspection.
 Cleanup remains a caller obligation, and legacy Job TTL policies stay unchanged.
 
 ## Initial status

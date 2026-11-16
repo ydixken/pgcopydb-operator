@@ -84,10 +84,19 @@ type seamsCluster struct {
 	claims   map[string]string
 	execs    []seamsExecRecord
 	failures []string
+	exits    []seamsExit
 	redact   []string
 	volumes  []string
 	stopSync chan struct{}
 	synced   sync.WaitGroup
+	// onStart runs before a Job's Pod starts, so a fault can be armed ahead of its program.
+	onStart func(*batchv1.Job)
+}
+
+// seamsExit is one finished Pod: the Job it ran for and its container's exit code.
+type seamsExit struct {
+	job  string
+	code int32
 }
 
 type seamsPod struct {
@@ -425,6 +434,9 @@ func (c *seamsCluster) startJob(ctx context.Context, job *batchv1.Job) error {
 	c.mu.Lock()
 	c.pods[pod.UID] = p
 	c.mu.Unlock()
+	if c.onStart != nil {
+		c.onStart(job)
+	}
 	stdout, stderr, err := seamsPodman(ctx, nil, args...)
 	if err != nil {
 		return fmt.Errorf("podman run %s: %v %s", pod.Name, err, c.scrub(string(stderr)))
@@ -803,6 +815,9 @@ func (c *seamsCluster) applyState(ctx context.Context, p *seamsPod, s seamsState
 	c.mu.Lock()
 	newly := finished && !p.finished
 	p.finished = finished
+	if newly {
+		c.exits = append(c.exits, seamsExit{job: p.job.Name, code: s.State.ExitCode})
+	}
 	c.mu.Unlock()
 	if newly && s.State.ExitCode != 0 {
 		tail := c.scrub(c.terminationTail(ctx, p.id))
@@ -817,6 +832,29 @@ func (c *seamsCluster) failuresSince(n int) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.failures[min(n, len(c.failures)):]...)
+}
+
+// exitsSince counts the finished Pods of Jobs named with prefix after the first n exits, by exit code zero or not.
+func (c *seamsCluster) exitsSince(n int, prefix string, skip ...string) (zero, nonzero int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.exits[min(n, len(c.exits)):] {
+		if !strings.HasPrefix(e.job, prefix) || slices.ContainsFunc(skip, func(s string) bool { return strings.HasPrefix(e.job, s) }) {
+			continue
+		}
+		if e.code == 0 {
+			zero++
+		} else {
+			nonzero++
+		}
+	}
+	return zero, nonzero
+}
+
+func (c *seamsCluster) exitCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.exits)
 }
 
 func (c *seamsCluster) failureCount() int {
@@ -1088,10 +1126,11 @@ func (c *seamsCluster) execCount() int {
 // kill sends a signal to a Pod's container the way a node-side kill does.
 func (c *seamsCluster) kill(ctx context.Context, jobName, signal string) error {
 	p := c.podFor(jobName)
-	if p == nil || p.id == "" {
-		return fmt.Errorf("no running pod for %s", jobName)
+	if p == nil {
+		return fmt.Errorf("no pod for %s", jobName)
 	}
-	_, stderr, err := seamsPodman(ctx, nil, "kill", "-s", signal, p.id)
+	// By name: a program can reach a crash point before podman run returns the container ID.
+	_, stderr, err := seamsPodman(ctx, nil, "kill", "-s", signal, p.container)
 	if err != nil {
 		return fmt.Errorf("kill: %v %s", err, stderr)
 	}
@@ -1099,15 +1138,33 @@ func (c *seamsCluster) kill(ctx context.Context, jobName, signal string) error {
 }
 
 // waitJob polls the store until the Job's status satisfies done.
-func (c *seamsCluster) waitJob(ctx context.Context, name string, done func(*batchv1.Job) bool) (*batchv1.Job, error) {
+func (c *seamsCluster) waitJob(ctx context.Context, name string, done func(*batchv1.Job) bool) error {
 	for {
 		job := &batchv1.Job{}
 		if err := c.store.Get(ctx, client.ObjectKey{Namespace: seamsNamespace, Name: name}, job); err == nil && done(job) {
-			return job, nil
+			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("job %s: %w", name, ctx.Err())
+			return fmt.Errorf("job %s: %w", name, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// waitFailedExit polls until the kubelet recorded a nonzero exit of the Job's container, which it
+// records only after writing the Failed status; the operator may delete a Failed helper at once.
+func (c *seamsCluster) waitFailedExit(ctx context.Context, name string) error {
+	for {
+		c.mu.Lock()
+		failed := slices.ContainsFunc(c.exits, func(e seamsExit) bool { return e.job == name && e.code != 0 })
+		c.mu.Unlock()
+		if failed {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("job %s has no failed exit: %w", name, ctx.Err())
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
