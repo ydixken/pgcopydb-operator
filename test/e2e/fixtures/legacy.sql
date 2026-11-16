@@ -1,6 +1,6 @@
--- Legacy-only fixture stage: the objects the native engine refuses before any
--- database change. run.sh stages it after the loads for the pgcopydb engine
--- only, and the native-refusal spec applies it to a seeded native source.
+-- Legacy-only fixture stage: the objects the native fixture leaves out, which
+-- native follow must admit. run.sh stages it after the loads for the pgcopydb engine
+-- only, and the native-widening spec applies it to a seeded native source.
 -- Every statement is idempotent, because both re-run it on kept clusters. It
 -- includes no prelude, so the spec can feed it to psql as it is.
 

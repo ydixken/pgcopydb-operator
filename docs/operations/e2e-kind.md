@@ -134,12 +134,15 @@ On macOS, `up`, `pull`, and the legacy and native runs require AC power and hold
 The guard refuses when `pmset` does not show that child's system-sleep assertions.
 The assertions do not stop a lid-close sleep, so keep the lid open and stay attended for the whole lease.
 `CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, `native-refusal`, `native-widening`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
-A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legacy.sql`: the objects the native engine refuses before any database change.
-`native-refusal`, which the guard admits on pair 16:16 only, applies that file to the source and expects the Migration to fail with reason `NativeBadConfig`, with neither database changed.
+The guard admits every spec on all three native pairs and refuses any other pair or spec name.
+A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legacy.sql`: the materialized view, the generated column, the domain `CHECK`, the citext `UNIQUE` index, and the expression and partial indexes.
+`native-refusal` creates one unlogged table on the source and runs a clone-only native Migration.
+Native clone refuses an unlogged relation while it plans, before it changes either database, so the spec expects the Migration to fail with reason `NativeBadConfig` after one attempt, with clone's relation refusal in the worker log and neither database changed.
+It uses a clone-only Migration because the operator's native follow preflight refuses an unlogged table itself, so a follow Migration never reaches the engine.
 Its budget for the refusal is 15 minutes: the 10 minutes a worker pod may wait for a node, plus 5 for the preflight.
-It then deletes the Migration and expects the finalizer to clear within five minutes after an owned inventory, with no cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
-It restores the native fixture afterwards, so other native specs on the same source see the shape they expect.
-`native-widening`, which the guard admits on all three native pairs, applies the same file to the source and runs a Manual follow Migration with schema and data verification.
+It then deletes the Migration and expects the finalizer to clear within five minutes with no inventory or cleanup Job, and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
+It drops the unlogged table afterwards, so other native specs on the same source see the shape they expect.
+`native-widening` applies `legacy.sql` to the source and runs a Manual follow Migration with schema and data verification.
 While it streams, the spec writes one row through the domain `CHECK`, the citext `UNIQUE` index, the expression and partial indexes and the generated column, then approves the cutover.
 It expects one attempt, `CutoverComplete` and `Verified`, the native cleanup and drain proofs, every widened object and the populated materialized view on the target, and the written rows, seed counts, large objects and sequences equal on both sides.
 It deletes its rows and restores the native fixture afterwards.
