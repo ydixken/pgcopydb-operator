@@ -54,10 +54,13 @@ func (r *Reader) admitCleaned(ctx context.Context, w ExecutionData, savedE strin
 			}
 		}
 	}
-	if helperPod == nil || workerPod == nil {
+	if helperPod == nil {
 		return nil, ErrNativeCleanedCompletionUnavailable
 	}
 	for _, selected := range []*corev1.Pod{helperPod, workerPod} {
+		if selected == nil {
+			continue
+		}
 		observed := &corev1.Pod{}
 		if r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: selected.Name}, observed) != nil || observed.UID != selected.UID {
 			return nil, ErrNativeCleanedCompletionUnavailable
@@ -68,7 +71,7 @@ func (r *Reader) admitCleaned(ctx context.Context, w ExecutionData, savedE strin
 }
 
 func validateCleanedObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, job, worker *batchv1.Job, pod, workerPod *corev1.Pod, savedE string, completed bool) (*ownedAdmission, error) {
-	if !validCleanedExecution(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil || workerPod == nil {
+	if !validCleanedExecution(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil {
 		return nil, ErrNativeCleanedCompletionUnavailable
 	}
 	if !cleanedMigrationMatches(w, m, worker, savedE) || !retryPVCMatches(w, m, pvc) || !retryHelperJobMatches(w, m, job) {

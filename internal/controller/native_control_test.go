@@ -111,6 +111,7 @@ func newNativeControlFixture(t *testing.T) *nativeControlFixture {
 		t.Fatal("worker owner fixture failed")
 	}
 	defaultProbeJob(worker)
+	m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
 	worker.Status.Active = 1
 	pod := probePod(worker)
 	pod.Status.Phase = corev1.PodRunning

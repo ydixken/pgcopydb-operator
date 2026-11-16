@@ -80,6 +80,7 @@ func newNativeCutoverEnv(ctx context.Context, name string) *nativeControlFixture
 	Expect(c.Status().Update(ctx, pod)).To(Succeed())
 	m.Status.Attempts, m.Status.JobName, m.Status.ObservedGeneration = 1, worker.Name, m.Generation
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
+	m.Status.NativeJobSHA256 = nativeTestDigest(GinkgoT(), worker)
 	Expect(c.Status().Update(ctx, m)).To(Succeed())
 
 	f := &nativeControlFixture{t: GinkgoT(), m: m, pvc: pvc, worker: worker, pod: pod, store: c, head: nativeControlTestEnd}

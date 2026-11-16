@@ -27,7 +27,7 @@ const (
 func TestNativeAttemptReceipt(t *testing.T) {
 	t.Run("atomic successful create", func(t *testing.T) {
 		f := newWorkerAttemptFixture(t)
-		f.patch = func(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
+		f.patch = nativeTestAfterIntent(func(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
 			raw, err := patch.Data(obj)
 			if err != nil {
 				t.Fatal(err)
@@ -39,12 +39,12 @@ func TestNativeAttemptReceipt(t *testing.T) {
 				t.Fatal("attempt/name and original Job/PVC UIDs were not one status patch")
 			}
 			return c.Status().Patch(ctx, obj, patch)
-		}
+		})
 		if _, err := f.r.startNativeAttempt(context.Background(), f.m, f.m.DeepCopy()); err != nil {
 			t.Fatal(err)
 		}
 		m := f.storedMigration()
-		if !native.NativeReceiptsMatch(m, workerServerUID, f.pvc.UID) || f.patches != 1 {
+		if !native.NativeReceiptsMatch(m, workerServerUID, f.pvc.UID) || f.patches != 2 {
 			t.Fatal("known Create did not durably record both receipts")
 		}
 	})
@@ -73,14 +73,14 @@ func TestNativeAttemptReceipt(t *testing.T) {
 				}
 			}
 			if outcome == "failed status" || outcome == receiptLostStatusReply {
-				f.patch = func(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
+				f.patch = nativeTestAfterIntent(func(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
 					if outcome == receiptLostStatusReply {
 						if err := c.Status().Patch(ctx, obj, patch); err != nil {
 							return err
 						}
 					}
 					return errors.New(workerAttemptCanary)
-				}
+				})
 			}
 			if _, err := f.r.startNativeAttempt(context.Background(), f.m, f.m.DeepCopy()); err == nil {
 				t.Fatal("ambiguous or preexisting worker was adopted")
@@ -157,7 +157,7 @@ func TestNativeReceiptControllerAdmission(t *testing.T) {
 
 func TestNativeAttemptReceiptConflict(t *testing.T) {
 	f := newWorkerAttemptFixture(t)
-	f.patch = func(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
+	f.patch = nativeTestAfterIntent(func(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
 		live := f.storedMigration()
 		live.Status.Attempts, live.Status.JobName = 1, jobName(live, 1)
 		live.Status.NativeJobUID, live.Status.NativePVCUID = "peer-original-job", "peer-original-pvc"
@@ -166,12 +166,12 @@ func TestNativeAttemptReceiptConflict(t *testing.T) {
 			t.Fatal(err)
 		}
 		return c.Status().Patch(ctx, obj, patch)
-	}
+	})
 	if _, err := f.r.startNativeAttempt(context.Background(), f.m, f.m.DeepCopy()); !apierrors.IsConflict(err) {
 		t.Fatal("receipt race did not retain optimistic conflict", err)
 	}
 	m := f.storedMigration()
-	if m.Status.NativeJobUID != "peer-original-job" || m.Status.NativePVCUID != "peer-original-pvc" || m.Status.Replication.Endpos != nativeControlLaterEnd || f.creates != 1 || f.patches != 1 || len(f.r.Recorder.(*events.FakeRecorder).Events) != 0 {
+	if m.Status.NativeJobUID != "peer-original-job" || m.Status.NativePVCUID != "peer-original-pvc" || m.Status.Replication.Endpos != nativeControlLaterEnd || f.creates != 1 || f.patches != 2 || len(f.r.Recorder.(*events.FakeRecorder).Events) != 0 {
 		t.Fatal("conflict overwrote receipts/E or replayed effects")
 	}
 }

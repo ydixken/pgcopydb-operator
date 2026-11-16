@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -32,9 +33,12 @@ func (r *MigrationReconciler) nativeRecoveryQuiescentCurrent(ctx context.Context
 	if err != nil || current.Generation != worker.Generation {
 		return nil, nil, errNativeRecovery
 	}
-	pod, err := r.nativeQuiescentWorker(ctx, live, current, claim)
-	if err != nil || ctx.Err() != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation ||
-		!apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !podexec.SamePodState(original, pod, workerContainer)) {
+	// The pod-less anchor is a state: once anchored, a pod that appears later is a change (R1).
+	pod, err := r.nativeEngineFreeWorker(ctx, live, current, claim)
+	if errors.Is(err, errNativeRecoveryActive) {
+		return nil, nil, err
+	}
+	if err != nil || ctx.Err() != nil || !nativeSameWorkerPod(original, pod) {
 		return nil, nil, errNativeRecovery
 	}
 	return live, pod, nil

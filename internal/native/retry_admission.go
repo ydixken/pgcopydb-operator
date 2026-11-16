@@ -15,6 +15,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,7 +48,13 @@ func (r *Reader) admitRetry(ctx context.Context, w ExecutionData, completed bool
 			return nil, ErrNativeRetryUnavailable
 		}
 	}
-	if m.Status.JobName == "" || r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: m.Status.JobName}, worker) != nil {
+	if m.Status.JobName == "" {
+		return nil, ErrNativeRetryUnavailable
+	}
+	if err := r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: m.Status.JobName}, worker); apierrors.IsNotFound(err) {
+		// A recorded worker that is gone is the zero Job; retryGoneWorker admits it only without a pod.
+		worker = &batchv1.Job{}
+	} else if err != nil {
 		return nil, ErrNativeRetryUnavailable
 	}
 	pods := &corev1.PodList{}
@@ -61,7 +68,7 @@ func (r *Reader) admitRetry(ctx context.Context, w ExecutionData, completed bool
 		if owner == nil {
 			continue
 		}
-		if owner.Name == w.JobName && owner.UID != w.JobUID || owner.Name == worker.Name && owner.UID != w.WorkerJobUID {
+		if owner.Name == w.JobName && owner.UID != w.JobUID || owner.Name == m.Status.JobName && owner.UID != w.WorkerJobUID {
 			return nil, ErrNativeRetryUnavailable
 		}
 		switch owner.UID {
@@ -77,10 +84,13 @@ func (r *Reader) admitRetry(ctx context.Context, w ExecutionData, completed bool
 			workerPod = p
 		}
 	}
-	if helperPod == nil || workerPod == nil {
+	if helperPod == nil {
 		return nil, ErrNativeRetryUnavailable
 	}
 	for _, selected := range []*corev1.Pod{helperPod, workerPod} {
+		if selected == nil {
+			continue
+		}
 		observed := &corev1.Pod{}
 		if r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: selected.Name}, observed) != nil || observed.UID != selected.UID {
 			return nil, ErrNativeRetryUnavailable
@@ -91,7 +101,7 @@ func (r *Reader) admitRetry(ctx context.Context, w ExecutionData, completed bool
 }
 
 func validateRetryObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, job, worker *batchv1.Job, pod, workerPod *corev1.Pod, completed bool) (*retryAdmission, error) {
-	if !validRetryExecution(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil || workerPod == nil {
+	if !validRetryExecution(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil {
 		return nil, ErrNativeRetryUnavailable
 	}
 	if !retryMigrationMatches(w, m, worker) || !retryPVCMatches(w, m, pvc) || !retryHelperJobMatches(w, m, job) {
@@ -114,7 +124,13 @@ func validateRetryObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.Per
 }
 
 func retryMigrationMatches(w ExecutionData, m *v1beta1.Migration, worker *batchv1.Job) bool {
-	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.DeletionTimestamp.IsZero() && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && !m.Spec.Suspend && m.Status.Attempts == w.Attempt && m.Status.JobName == worker.Name
+	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.DeletionTimestamp.IsZero() && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && !m.Spec.Suspend && m.Status.Attempts == w.Attempt &&
+		(m.Status.JobName == worker.Name || retryWorkerGone(worker) && m.Status.JobName == m.Name+"-run-"+strconv.FormatInt(int64(w.Attempt), 10))
+}
+
+// retryWorkerGone is the zero Job admitRetry substitutes for a recorded worker the API no longer has.
+func retryWorkerGone(worker *batchv1.Job) bool {
+	return worker != nil && reflect.DeepEqual(*worker, batchv1.Job{})
 }
 
 func retryPVCMatches(w ExecutionData, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) bool {
@@ -130,8 +146,12 @@ func retrySingleJob(job *batchv1.Job) bool {
 	return oneJob(job) && job.Spec.BackoffLimit != nil && *job.Spec.BackoffLimit == 0 && (job.Spec.CompletionMode == nil || *job.Spec.CompletionMode == batchv1.NonIndexedCompletion) && (job.Spec.ManualSelector == nil || !*job.Spec.ManualSelector) && job.Spec.BackoffLimitPerIndex == nil && job.Spec.MaxFailedIndexes == nil && job.Spec.PodFailurePolicy == nil && job.Spec.SuccessPolicy == nil && (job.Status.Terminating == nil || *job.Status.Terminating == 0) && (uncounted == nil || len(uncounted.Succeeded)+len(uncounted.Failed) == 0)
 }
 
+// retryFailedWorker admits a failed worker with or without its pod, or a gone worker that left no pod.
 func retryFailedWorker(w ExecutionData, m *v1beta1.Migration, worker *batchv1.Job, pod *corev1.Pod) bool {
-	return retryFailedWorkerJob(w, m, worker) && retryFailedWorkerPod(w, worker, pod)
+	if retryWorkerGone(worker) {
+		return pod == nil
+	}
+	return retryFailedWorkerJob(w, m, worker) && (pod == nil || retryFailedWorkerPod(w, worker, pod))
 }
 
 func retryFailedWorkerJob(w ExecutionData, m *v1beta1.Migration, worker *batchv1.Job) bool {
@@ -194,7 +214,7 @@ func retryHelperState(w ExecutionData, job *batchv1.Job, pod *corev1.Pod, comple
 }
 
 func (a *retryAdmission) same(b *retryAdmission) bool {
-	return a != nil && b != nil && a.helper.sameExecution(b.helper) && reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.helper.worker.OwnerReferences, b.helper.worker.OwnerReferences) && a.workerPod.UID == b.workerPod.UID && a.workerPod.Name == b.workerPod.Name && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && podexec.SamePodState(a.workerPod, b.workerPod, nativeContainerName) && reflect.DeepEqual(a.workerPod.OwnerReferences, b.workerPod.OwnerReferences)
+	return a != nil && b != nil && a.helper.sameExecution(b.helper) && reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.helper.worker.OwnerReferences, b.helper.worker.OwnerReferences) && (a.workerPod == nil && b.workerPod == nil || a.workerPod != nil && b.workerPod != nil && a.workerPod.UID == b.workerPod.UID && a.workerPod.Name == b.workerPod.Name && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && podexec.SamePodState(a.workerPod, b.workerPod, nativeContainerName) && reflect.DeepEqual(a.workerPod.OwnerReferences, b.workerPod.OwnerReferences))
 }
 
 // RetryMaterialization projects only the target and cannot admit a live execution by itself.

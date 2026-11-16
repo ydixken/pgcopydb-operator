@@ -94,6 +94,7 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 	worker.UID = "clone-original-job"
 	worker.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
+	m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
 	pod := nativeRecoveryTestPod(worker, 0)
 	pod.Labels = maps.Clone(worker.Spec.Template.Labels)
 	pod.Labels[batchv1.ControllerUidLabel] = string(worker.UID)

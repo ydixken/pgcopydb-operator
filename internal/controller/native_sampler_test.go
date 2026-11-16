@@ -60,6 +60,7 @@ func newNativeSamplerFixtureMode(t *testing.T, follow bool) (*nativeSamplerFixtu
 		pod := probePod(worker)
 		pod.Status = f.pod.Status
 		f.pod = pod
+		f.m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
 		f.store = clientfake.NewClientBuilder().WithScheme(f.r.Scheme).WithObjects(f.m, f.pvc, f.worker, f.pod).WithStatusSubresource(&v1beta1.Migration{}).Build()
 	}
 	want, err := f.r.admitNativeWorkerExecution(context.Background(), f.m, f.worker, f.pvc)

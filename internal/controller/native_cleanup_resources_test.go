@@ -43,6 +43,7 @@ func newCleanupInventoryFixture(t *testing.T) *cleanupInventoryFixture {
 	t.Helper()
 	s, r := newLifecycleAPI(t)
 	s.migration.Status.NativeJobUID = string(s.worker.UID)
+	s.migration.Status.NativeJobSHA256 = nativeTestDigest(t, s.worker)
 	s.migration.Status.NativePVCUID = string(s.pvc.UID)
 	s.migration.Status.Replication = nil
 	work, err := nativeWorkIdentity(s.migration, s.pvc)

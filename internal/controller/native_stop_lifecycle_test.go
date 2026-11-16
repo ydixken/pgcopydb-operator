@@ -45,6 +45,7 @@ func nativeRetainedStopFixture(t *testing.T) *nativeRecoveryFixture {
 	f.pod.Status.Phase = corev1.PodRunning
 	f.pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
 	f.m.Status.NativeJobUID, f.m.Status.NativePVCUID = string(f.worker.UID), string(f.pvc.UID)
+	f.m.Status.NativeJobSHA256 = nativeTestDigest(t, f.worker)
 	f.replace(f.worker)
 	f.replace(f.pod)
 	f.replace(f.m)

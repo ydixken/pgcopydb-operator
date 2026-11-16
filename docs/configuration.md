@@ -26,6 +26,26 @@ Once the record exists, the API server rejects any write that changes or removes
 > Each reconcile returns an error and changes nothing, deletion included, so its source replication resources stay in place.
 > Run the operator release that admitted it, or, when the field is missing, record the image its worker Job runs.
 
+### Spec changes on a running native Migration
+
+With `spec.engine: rpgmigrate`, each attempt keeps the worker Job admitted when the operator created it.
+The receipt of the attempt records that Job's admission digest in `status.nativeJobSHA256`, and later passes check the live Job against the digest, not against a Job rebuilt from the current spec.
+A change to `spec.runner` (resources, node selector, tolerations, affinity), to `spec.clone`, or to the Migration's labels and annotations therefore applies from the next attempt, and the running attempt continues.
+
+Before it creates a worker, the operator records `status.nativeWorkerIntent`: the attempt, a random nonce, and the digest of the Job it is about to create.
+The Job carries the same attempt and nonce in its annotation `pgcopydb-operator.io/native-worker-intent`.
+When the receipt of a created worker is lost, a later pass adopts the Job that matches the intent, and no second worker starts.
+A Job under the next attempt's name that matches no intent is recorded as a failed attempt that counts toward `backoffLimit`.
+The operator then deletes that Job, and the retry gate decides the next attempt.
+
+> [!warning]
+> An edit to the native worker Job itself, such as a new label, makes the Job differ from its digest.
+> While that worker runs, `Blocked` is True with reason `WorkerModified`, and the operator neither reads nor drives it.
+> Undo the edit to let the attempt continue.
+
+A native Migration that an operator build without `status.nativeJobSHA256` admitted has no digest to check its worker against.
+The controller refuses it on every reconcile, deletion included, so let native Migrations finish before you upgrade from such a build.
+
 ## Clone tuning
 
 The `clone` block holds parallelism, same-table splitting, and skips.
@@ -418,6 +438,9 @@ So an apply commit lost in a target failover would lose those changes for good.
 
 `synchronousCommit` is the only target field you can change after the Migration exists.
 A change applies from the next attempt, because a running worker keeps the URI it started with.
+
+With `spec.engine: rpgmigrate`, admission refuses `synchronousCommit` on either endpoint, and the Migration fails with reason `InvalidSpec`.
+Setting it on an admitted native Migration keeps the running attempt, but the operator refuses to start any later attempt until you unset it.
 
 Admission rejects the field on the source.
 It also rejects the field together with `uriSecretRef`, because the operator never reads that Secret and cannot add the option to it.

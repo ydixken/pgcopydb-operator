@@ -433,6 +433,10 @@ func TestNativePlainCloneCompletionHelperDisposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.worker = canonical
+	f.m.Status.NativeJobSHA256 = nativeTestDigest(t, canonical)
+	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+		t.Fatal(err)
+	}
 	f.pod.Spec = *canonical.Spec.Template.Spec.DeepCopy()
 	f.pod.Spec.NodeName = finishFixtureNode
 	f.replace(f.pod)

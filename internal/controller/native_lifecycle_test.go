@@ -116,6 +116,7 @@ func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 	if err := controllerutil.SetControllerReference(m, worker, scheme); err != nil {
 		t.Fatal(err)
 	}
+	m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
 	s.extraPods = []corev1.Pod{*nativeRecoveryTestPod(worker, 0)}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion, batchv1.SchemeGroupVersion, v1beta1.GroupVersion})
 	for _, entry := range []struct {
@@ -461,6 +462,7 @@ func lifecycleConfiguredOverride(t *testing.T) {
 	image := "registry.example.test/team/override@sha256:" + strings.Repeat("2", 64)
 	s.migration.Spec.Runner.Image = image
 	s.worker.Spec.Template.Spec.Containers[0].Image = image
+	s.migration.Status.NativeJobSHA256 = nativeTestDigest(t, s.worker)
 	s.extraPods[0].Spec.Containers[0].Image = image
 	s.extraPods[0].Status.ContainerStatuses[0].ImageID = image
 	r.RPGMigrateRunnerImage = ""

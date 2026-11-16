@@ -94,6 +94,7 @@ func TestNativeReconcileSuccessfulClone(t *testing.T) {
 	}
 }
 
+// A canonical worker without a matching intent is never adopted: it is recorded failed and counted (q4).
 func TestNativeReconcileUnrecordedWorker(t *testing.T) {
 	f := newWorkerAttemptFixture(t)
 	worker := f.expected()
@@ -102,8 +103,10 @@ func TestNativeReconcileUnrecordedWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := nativeDispatch(t, f.r, f.m)
-	if err == nil || f.creates != 0 || f.patches != 0 {
-		t.Fatal("unrecorded canonical worker was adopted")
+	got := f.storedMigration()
+	if err != nil || f.creates != 0 || f.patches != 1 || got.Status.NativeJobUID != string(workerServerUID) || got.Status.RetryGate == nil ||
+		got.Status.RetryGate.FailedAttempt != 1 || got.Status.RetryGate.Exemption != v1beta1.RetryGateCounted || len(f.r.Recorder.(*events.FakeRecorder).Events) != 0 {
+		t.Fatal("unrecorded canonical worker was adopted or left unrecorded", err, got.Status.RetryGate)
 	}
 }
 
@@ -138,7 +141,8 @@ func TestNativeReconcileStart(t *testing.T) {
 				return c.Create(ctx, o, opts...)
 			case *batchv1.Job:
 				if o.Name == jobName(f.m, 1) {
-					if f.logs.Load() != 2 || patches != 0 {
+					// Only the intent patch precedes the worker Create (q4).
+					if f.logs.Load() != 2 || patches != 1 {
 						t.Fatal("worker credentials projected before actual active preflight")
 					}
 					workers++
@@ -158,7 +162,7 @@ func TestNativeReconcileStart(t *testing.T) {
 		t.Fatalf("native startup failed: %+v %v", result, err)
 	}
 	stored := &v1beta1.Migration{}
-	if f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), stored) != nil || workers != 1 || patches != 1 || stored.Status.Attempts != 1 || stored.Status.NativeJobUID != string(workerServerUID) || stored.Status.NativePVCUID != "native-dispatch-pvc" || stored.Status.JobName != jobName(f.m, 1) {
+	if f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), stored) != nil || workers != 1 || patches != 2 || stored.Status.Attempts != 1 || stored.Status.NativeJobUID != string(workerServerUID) || stored.Status.NativePVCUID != "native-dispatch-pvc" || stored.Status.JobName != jobName(f.m, 1) {
 		t.Fatal("startup did not atomically persist actual worker/PVC receipt and attempt")
 	}
 }
@@ -296,11 +300,11 @@ func TestNativeReconcileUnknownProgress(t *testing.T) {
 }
 
 func TestNativeReconcileRetainedIdentity(t *testing.T) {
-	for _, change := range []string{"missing worker", "missing PVC", nativeReconcileWorkerReplacementCase, "replaced PVC", "unrecorded receipts", "changed canonical worker"} {
+	for _, change := range []string{"missing PVC", "replaced PVC", "unrecorded receipts"} {
 		t.Run(change, func(t *testing.T) {
 			f := newNativeCloneFixture(t, false, nil)
 			switch change {
-			case "missing worker":
+			case nativeMissingWorkerCase:
 				if err := f.store.Delete(context.Background(), f.worker); err != nil {
 					t.Fatal(err)
 				}
@@ -337,6 +341,41 @@ func TestNativeReconcileRetainedIdentity(t *testing.T) {
 	}
 }
 
+// A gone, foreign or modified recorded worker is never read: the W table counts or holds it.
+const nativeMissingWorkerCase = "missing worker"
+
+func TestNativeReconcileRetainedWorkerStates(t *testing.T) {
+	for _, change := range []string{nativeMissingWorkerCase, nativeReconcileWorkerReplacementCase, "changed canonical worker"} {
+		t.Run(change, func(t *testing.T) {
+			f := newNativeCloneFixture(t, false, nil)
+			f.r.Recorder = events.NewFakeRecorder(10)
+			switch change {
+			case nativeMissingWorkerCase:
+				if err := f.store.Delete(context.Background(), f.worker); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				worker := f.worker.DeepCopy()
+				if change == nativeReconcileWorkerReplacementCase {
+					worker.UID = probeReplacement
+				} else {
+					worker.Spec.Template.Spec.HostPID = true
+				}
+				if err := f.store.Update(context.Background(), worker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := nativeDispatch(t, f.r, f.m)
+			got := f.current()
+			counted := got.Status.RetryGate != nil && got.Status.RetryGate.Exemption == v1beta1.RetryGateCounted
+			held := meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionBlocked)
+			if want := change == nativeReconcileWorkerReplacementCase; err != nil || f.logs != 0 || f.patches != 1 || held != want || counted == want {
+				t.Fatalf("recorded worker state %q: err=%v logs=%d patches=%d held=%v counted=%v", change, err, f.logs, f.patches, held, counted)
+			}
+		})
+	}
+}
+
 func TestNativeUnreceiptedTerminalRejoin(t *testing.T) {
 	for _, condition := range []string{v1beta1.ConditionComplete, v1beta1.ConditionFailed} {
 		t.Run(condition, func(t *testing.T) {
@@ -348,6 +387,13 @@ func TestNativeUnreceiptedTerminalRejoin(t *testing.T) {
 			meta.SetStatusCondition(&f.m.Status.Conditions, metav1.Condition{Type: condition, Status: metav1.ConditionTrue, Reason: "StaleDisplay"})
 			if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 				t.Fatal(err)
+			}
+			if condition == v1beta1.ConditionFailed {
+				// R6: Failed is absorbing until deletion, whatever the worker shows.
+				if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.logs != 0 || f.patches != 0 {
+					t.Fatalf("Failed Migration was revived: %v logs=%d patches=%d", err, f.logs, f.patches)
+				}
+				return
 			}
 			if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.logs != 1 {
 				t.Fatalf("stale display bypassed actual terminal clone consumer: %v logs=%d", err, f.logs)

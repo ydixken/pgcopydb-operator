@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -110,12 +111,13 @@ func (r *MigrationReconciler) startNativeAttemptAdmitted(ctx context.Context, m,
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if live.Status.Attempts < 0 || live.Status.Attempts == int32(1<<31-1) {
+	// The N table clears an earlier intent before any pass may admit a new one.
+	if live.Status.Attempts < 0 || live.Status.Attempts >= int32(1<<31-2) || live.Status.NativeWorkerIntent != "" {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
-	expected, err := buildNativeWorkerJob(live, pvc, r.RPGMigrateRunnerImage, live.Status.Attempts+1)
-	if err != nil || controllerutil.SetControllerReference(live, expected, r.Scheme) != nil {
-		return ctrl.Result{}, errNativeWorkerAdmission
+	expected, intent, err := r.nativeIntendedWorker(live, pvc)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	key := types.NamespacedName{Namespace: live.Namespace, Name: expected.Name}
 	actual := &batchv1.Job{}
@@ -126,6 +128,9 @@ func (r *MigrationReconciler) startNativeAttemptAdmitted(ctx context.Context, m,
 	case apierrors.IsNotFound(getErr):
 		if _, _, err := current(ctx, live, pvc); err != nil || ctx.Err() != nil {
 			return ctrl.Result{}, errNativeWorkerAdmission
+		}
+		if live, err = r.recordNativeWorkerIntent(ctx, live, retry, intent); err != nil {
+			return ctrl.Result{}, err
 		}
 		actual = expected.DeepCopy()
 		if createErr := r.Create(ctx, actual); createErr != nil {
@@ -148,6 +153,43 @@ func (r *MigrationReconciler) startNativeAttemptAdmitted(ctx context.Context, m,
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
 	return r.recordNativeAttempt(ctx, confirmedMigration, confirmedMigration.DeepCopy(), confirmed, pvc, true, retry)
+}
+
+// nativeIntendedWorker builds the next attempt's worker with a fresh intent nonce and returns its status intent.
+func (r *MigrationReconciler) nativeIntendedWorker(live *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) (*batchv1.Job, string, error) {
+	attempt := live.Status.Attempts + 1
+	expected, err := buildNativeWorkerJob(live, pvc, r.RPGMigrateRunnerImage, attempt)
+	if err != nil || controllerutil.SetControllerReference(live, expected, r.Scheme) != nil {
+		return nil, "", errNativeWorkerAdmission
+	}
+	annotation, err := nativeNewIntent(attempt)
+	if err != nil {
+		return nil, "", err
+	}
+	if expected.Annotations == nil {
+		expected.Annotations = map[string]string{}
+	}
+	expected.Annotations[nativeWorkerIntentAnnotation] = annotation
+	digest, err := nativeJobSHA256(expected)
+	if err != nil {
+		return nil, "", errNativeWorkerAdmission
+	}
+	return expected, annotation + "/" + digest, nil
+}
+
+// recordNativeWorkerIntent makes the intent durable before the Create (q4), so a lost receipt is adopted,
+// never duplicated. The optimistic lock holds the Migration unchanged since the last admission check.
+func (r *MigrationReconciler) recordNativeWorkerIntent(ctx context.Context, live *v1beta1.Migration, retry *nativeRetryAdmission, intent string) (*v1beta1.Migration, error) {
+	intended := live.DeepCopy()
+	intended.Status.NativeWorkerIntent = intent
+	if err := r.Status().Patch(ctx, intended, client.MergeFromWithOptions(live, client.MergeFromWithOptimisticLock{})); err != nil {
+		return nil, nativeWorkerError(err)
+	}
+	if retry != nil {
+		// The retry admission compares its snapshot with live status; only the intent differs.
+		retry.migration.Status.NativeWorkerIntent = intent
+	}
+	return intended, nil
 }
 
 func nativeWorkerJobMatches(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, expected, actual *batchv1.Job) bool {

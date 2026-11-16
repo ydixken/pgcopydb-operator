@@ -157,6 +157,7 @@ func newCompletionProbe(t *testing.T, follow bool) (*preflightFixture, *batchv1.
 	worker.UID, worker.Generation = "retained-worker", 1
 	worker.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
 	f.m.Status.NativeJobUID, f.m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
+	f.m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
 	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)
 	}
