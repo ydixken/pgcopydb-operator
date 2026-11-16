@@ -312,7 +312,7 @@ spec:
 `DB` holds either a bare database name or a full libpq URI.
 The URI MUST be password-free.
 The password comes from the `PW` key, which MUST exist in every layout.
-A URI that carries credentials is rejected.
+A URI that carries credentials is rejected, whether in the userinfo or in the query.
 A URI is authoritative for user, host, port, and database name.
 It also keeps its own `sslmode` over the one in the spec.
 When a URI names no user, the user comes from the `USER` key.
@@ -333,7 +333,10 @@ Each passfile line names the exact host and port the connection uses, so a sourc
 A URI without a port resolves to `PGPORT`, then 5432, the way libpq does.
 The worker rejects, by name, an endpoint it cannot bind to one line: IPv6 literals, several hosts, a missing host, percent-encoding in the host or a query key, and `host`, `port`, or `service` in the URI query.
 The inline `host` follows the same rule and accepts only a DNS name or an IPv4 address.
+The worker also rejects a URI query that sets one of the libpq secret keys `password`, `sslpassword`, `oauth_client_secret`, `scram_client_key`, or `scram_server_key`, in any letter case.
 `uriSecretRef` carries its own credentials and has none of these limits, unless the side also sets `superuserSecretRef`.
+The inline `username` is used literally, whatever characters the role name holds.
+A role name with a line break cannot authenticate through the passfile, because a passfile line cannot hold one.
 
 Each side MAY also set `superuserSecretRef`, a Secret in the same convention that names a superuser on the same endpoint.
 For single-database migrations, preflight checks that Secret.

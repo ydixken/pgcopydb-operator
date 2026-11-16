@@ -45,6 +45,15 @@ const (
 // script Jobs), so one prelude serves both shapes.
 const execArgv0 = `exec "$0" "$@"`
 
+// shellQuote renders s as one single-quoted sh word.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// quotedInDouble splices s literally into a double-quoted sh string.
+func quotedInDouble(s string) string { return `"` + shellQuote(s) + `"` }
+
+// passfileField escapes a passfile field as pf_esc does: libpq reads '\' and ':' escaped.
+var passfileField = strings.NewReplacer(`\`, `\\`, `:`, `\:`)
+
 // PgpassPath is where the runner prelude assembles the passfile. It must be
 // writable in the runner image (the work volume is, and /tmp is).
 const PgpassPath = "/tmp/pgpass"
@@ -337,7 +346,7 @@ printf '%s:%s:*:%s:%s\n' "$(pf_esc "$pf_host")" "$pf_port" "$(pf_esc "$sup_user"
 		"@SUPERURI@", SuperURIEnv(s),
 		"@URIFILE@", SuperURIFile(s),
 		"@PWFILE@", pwFile,
-		"@PWKEY@", pwKey,
+		"@PWKEY@", quotedInDouble(pwKey),
 		"@PGPASS@", PgpassPath,
 		"@SIDE@", string(s),
 	).Replace(template)
@@ -448,7 +457,8 @@ func fillParams(q string) string {
 
 // endpointShell defines pf_endpoint LABEL HOSTPORT URI: it sets pf_host and pf_port to what
 // libpq matches the passfile against (no port means PGPORT, then 5432), or refuses the endpoint
-// by name when the URI authority or query would make libpq connect somewhere the line does not name.
+// by name when the URI authority or query would make libpq connect somewhere the line does not name,
+// or when the query names a libpq secret key in any letter case (percent-encoded keys never get that far).
 const endpointShell = `pf_endpoint() {
   case "$2" in ''|:*|*,*|*\[*|*\]*|*%*) echo "$1: endpoint '$2' cannot be bound to an exact passfile line; use one host or host:port without IPv6 brackets or percent-encoding" >&2; exit 1 ;; esac
   pf_host=${2%%:*}
@@ -458,6 +468,8 @@ const endpointShell = `pf_endpoint() {
   while [ -n "$pf_q" ]; do
     pf_k=${pf_q%%\&*}; pf_q=${pf_q#*\&}; pf_k=${pf_k%%=*}
     case "$pf_k" in host|port|service|*%*) echo "$1: the URI query sets '$pf_k', which moves the endpoint off its passfile line; name host and port in the URI authority" >&2; exit 1 ;; esac
+    pf_k=$(printf '%s' "$pf_k" | tr 'A-Z' 'a-z')
+    case "$pf_k" in password|sslpassword|oauth_client_secret|scram_client_key|scram_server_key) echo "$1: the URI query sets '$pf_k', which carries a credential; keep credentials out of the URI" >&2; exit 1 ;; esac
   done
 }
 `
@@ -508,7 +520,7 @@ pf_endpoint "@SIDE@ connection secret" "$hostport" "$uri"
 		"@USER@", pgmEnv(s, "USER"),
 		"@HOST@", pgmEnv(s, "HOST"),
 		"@SIDE@", string(s),
-		"@PWKEY@", pwKey,
+		"@PWKEY@", quotedInDouble(pwKey),
 	).Replace(template)
 	// libpq rejects the empty param an append after a trailing ? or & would leave.
 	b += `case "$uri" in *[?\&]) uri=${uri%?} ;; esac
@@ -532,7 +544,7 @@ pf_endpoint "@SIDE@ connection secret" "$hostport" "$uri"
 	}
 	b += `export ` + uriEnv(s) + `="$uri"
 printf '%s' "$uri" > ` + URIFile(s) + `
-[ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + pwKey + ` missing" >&2; exit 1; }
+[ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + quotedInDouble(pwKey) + ` missing" >&2; exit 1; }
 printf '%s:%s:*:%s:%s\n' "$(pf_esc "$pf_host")" "$pf_port" "$(pf_esc "$user")" "$(pf_esc "$(cat ` + pwFile + `)")" >> ` + PgpassPath + `
 `
 	return b
@@ -582,9 +594,9 @@ func tlsVolume(s Side, tls *v1beta1.TLSSecretRefs) (corev1.Volume, corev1.Volume
 }
 
 // PreludeScript assembles the passfile, runs each side's snippet, then execs $0
-// with "$@". Static entries escape only the password: hosts and users come from
-// the validated spec. setup runs last so it can authenticate, and must be
-// trusted operator-composed shell.
+// with "$@". Static entries shell-quote and passfile-escape host and user, which
+// the spec carries; the file path is operator-composed. setup runs last so it
+// can authenticate, and must be trusted operator-composed shell.
 func PreludeScript(preludes []string, entries []Passfile, setup string) string {
 	var pre []string
 	for _, p := range preludes {
@@ -601,8 +613,8 @@ func PreludeScript(preludes []string, entries []Passfile, setup string) string {
 			// sed escapes backslashes first, then colons; $(cat ...) would strip
 			// trailing newlines which sed does not, so sed reads the file itself.
 			fmt.Fprintf(&b,
-				"printf '%%s:%d:*:%%s:%%s\\n' '%s' '%s' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
-				e.Port, e.Host, e.User, e.File, PgpassPath)
+				"printf '%%s:%d:*:%%s:%%s\\n' %s %s \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
+				e.Port, shellQuote(passfileField.Replace(e.Host)), shellQuote(passfileField.Replace(e.User)), e.File, PgpassPath)
 		}
 		for _, p := range pre {
 			b.WriteString(p)

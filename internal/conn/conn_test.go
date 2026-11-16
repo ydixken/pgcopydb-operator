@@ -19,6 +19,7 @@ package conn
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"maps"
 	"net/url"
 	"os"
@@ -410,15 +411,88 @@ func TestPreludeScript_PassfileEscaping(t *testing.T) {
 // TestSecretRefPrelude_PasswordURINeverLeaks proves a rejected password-bearing
 // DB URI leaves the credential in no output, no URI file, and no passfile.
 func TestSecretRefPrelude_PasswordURINeverLeaks(t *testing.T) {
-	_, passfile, urifile, out, err := runSecretRefPrelude(t, secretConn(),
-		map[string]string{envSrcDB: "postgresql://alice:s3cret@db.example.com/app"}, "")
-	if err == nil {
-		t.Fatal("want rejection of a password-bearing DB URI")
-	}
-	for name, got := range map[string]string{"output": out, "URI file": urifile, "passfile": passfile} {
-		if strings.Contains(got, "s3cret") {
-			t.Fatalf("%s leaks the URI password: %q", name, got)
+	for _, db := range []string{
+		"postgresql://alice:s3cret@db.example.com/app",
+		"postgresql://alice@db.example.com/app?password=s3cret",
+		"postgresql://alice@db.example.com/app?sslmode=require&sslpassword=s3cret",
+	} {
+		_, passfile, urifile, out, err := runSecretRefPrelude(t, secretConn(), map[string]string{envSrcDB: db}, tPass)
+		if err == nil {
+			t.Fatalf("want rejection of the credential-bearing DB URI %q", db)
 		}
+		for name, got := range map[string]string{"output": out, "URI file": urifile, "passfile": passfile} {
+			if strings.Contains(got, "s3cret") {
+				t.Fatalf("%s leaks the URI credential of %q: %q", name, db, got)
+			}
+		}
+	}
+}
+
+// TestPreludes_PasswordKeyIsQuoted proves a remapped password key name reaches
+// the error text literally: the API server does not restrict a volume item key.
+func TestPreludes_PasswordKeyIsQuoted(t *testing.T) {
+	const key = `x"$(echo pwned >&2)'y`
+	c := secretConn()
+	c.SecretRef.Keys = &v1beta1.ConnectionSecretKeys{Password: key}
+	for _, tc := range []struct{ env map[string]string }{
+		{map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser}},
+		{map[string]string{envSrcDB: "postgresql://alice:pw@db.example.com/app"}},
+	} {
+		_, _, _, out, err := runSecretRefPrelude(t, c, tc.env, "")
+		if err == nil || !strings.Contains(out, key) || strings.Count(out, "pwned") != 1 {
+			t.Fatalf("want one failure naming the key %q literally, got %v: %q", key, err, out)
+		}
+	}
+	s := superConn()
+	s.SuperuserSecretRef.Keys = &v1beta1.ConnectionSecretKeys{Password: key}
+	_, _, _, out, err := runSuperPrelude(t, Source, s,
+		map[string]string{envSrcPGURI: tURI6432, envSrcSuperUser: tSuperUser}, "", "")
+	if err == nil || !strings.Contains(out, "password key "+key+" missing") || strings.Count(out, "pwned") != 1 {
+		t.Fatalf("want the superuser failure naming the key %q literally, got %v: %q", key, err, out)
+	}
+}
+
+// TestPreludeScript_UsernameIsLiteral runs inline-form passfile entries whose
+// user carries shell and passfile syntax: each must land as one escaped field
+// and no part of it may run as shell.
+func TestPreludeScript_UsernameIsLiteral(t *testing.T) {
+	for i, user := range []string{
+		"o'brien",
+		`a"b`,
+		"semi;colon",
+		`back\slash`,
+		"co:lon",
+		"x'; echo INJECTED >&2; '",
+		"$(echo INJECTED >&2)`echo INJECTED >&2`",
+		"x'\necho INJECTED >&2\n'",
+	} {
+		// Indexed names: t.TempDir embeds the name in the path the script carries.
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			dir := t.TempDir()
+			pw := filepath.Join(dir, "pw")
+			if err := os.WriteFile(pw, []byte("p:w"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pgpass := filepath.Join(dir, "pgpass")
+			script := strings.ReplaceAll(PreludeScript(nil, []Passfile{{Host: tHost, Port: 5432, User: user, File: pw}}, ""), PgpassPath, pgpass)
+			out, err := exec.Command(shellPath(t), "-c", script, "true").CombinedOutput()
+			if err != nil || len(out) != 0 {
+				t.Fatalf("user %q: prelude failed or printed: %v %q", user, err, out)
+			}
+			raw, err := os.ReadFile(pgpass)
+			if err != nil {
+				t.Fatal(err)
+			}
+			esc := strings.NewReplacer(`\`, `\\`, ":", `\:`).Replace(user)
+			if want := tHost + ":5432:*:" + esc + `:p\:w` + "\n"; string(raw) != want {
+				t.Fatalf("user %q: passfile %q, want %q", user, raw, want)
+			}
+			if !strings.Contains(user, "\n") {
+				if f := libpqPassfileFields(strings.TrimSuffix(string(raw), "\n")); len(f) != 5 || f[3] != user || f[4] != "p:w" {
+					t.Fatalf("user %q: passfile line parses to %q", user, f)
+				}
+			}
+		})
 	}
 }
 
@@ -897,6 +971,19 @@ func TestSecretRefPrelude(t *testing.T) {
 		{name: "uri query service fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?service=s"}, wantErr: "the URI query sets 'service'"},
 		{name: "percent-encoded uri query key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?%70ort=6432"}, wantErr: "the URI query sets '%70ort'"},
 		{name: "uri empty port fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com:/app"}, wantErr: "port '' is not one decimal port"},
+		{name: "uri query password fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?password=s3cret"}, wantErr: "the URI query sets 'password'"},
+		{name: "uri query sslpassword in mixed case fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=a&SSLPassword=s3cret"}, wantErr: "the URI query sets 'sslpassword'"},
+		{name: "uri query oauth_client_secret fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?oauth_client_secret=s3cret"}, wantErr: "the URI query sets 'oauth_client_secret'"},
+		{name: "uri query scram_client_key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?scram_client_key=s3cret"}, wantErr: "the URI query sets 'scram_client_key'"},
+		{name: "uri query scram_server_key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?SCRAM_SERVER_KEY=s3cret"}, wantErr: "the URI query sets 'scram_server_key'"},
+		{name: "percent-encoded uri query password fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?pass%77ord=s3cret"}, wantErr: "the URI query sets 'pass%77ord'"},
+		{
+			name:     "uri query value naming a secret key passes",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=password"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=password&" + tSrcKeep,
+			wantLine: tLine,
+		},
 		{name: "bare non-decimal port fails", env: map[string]string{envSrcDB: tDB, envSrcHost: "db.example.com:64x2", envSrcUser: tUser}, wantErr: "port '64x2' is not one decimal port"},
 		{name: "bare ipv6 host fails", env: map[string]string{envSrcDB: tDB, envSrcHost: "::1", envSrcUser: tUser}, wantErr: tUnbound},
 		{name: "PGPORT list fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app", envPGPort: "5432,6432"}, wantErr: "port '5432,6432' is not one decimal port"},
@@ -1185,6 +1272,11 @@ func TestSuperPrelude(t *testing.T) {
 			name:    "primary query port fails",
 			env:     map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB + "?port=6432"},
 			wantErr: "superuser secret: the URI query sets 'port'",
+		},
+		{
+			name:    "primary query password fails",
+			env:     map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB + "?Password=s3cret"},
+			wantErr: "superuser secret: the URI query sets 'password'",
 		},
 		{
 			name:      "password-bearing primary never leaks into the super URI",
