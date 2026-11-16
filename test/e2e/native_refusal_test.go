@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -27,6 +28,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,6 +54,12 @@ const (
 	nativeRefusalFixtureSQL = "CREATE UNLOGGED TABLE IF NOT EXISTS public.e2e_unlogged" +
 		" (id bigint PRIMARY KEY, note text NOT NULL);\n"
 	nativeRefusalRestoreSQL = "DROP TABLE IF EXISTS public.e2e_unlogged;\n"
+	nativeFollowRefusalName = "e2e-native-refusal-follow"
+	// nativeFollowRefusalMessage is the operator's condition message when the follow preflight's
+	// unlogged check fails: an exact_true check refuses with the result class.
+	nativeFollowRefusalMessage = "native preflight execution refused: error class result"
+	nativeFollowRefusalReason  = "NativePreflightFailed"
+	nativeFinalizer            = "pgcopydb-operator.io/cleanup"
 	// nativeRefusalBudget covers a worker pod waiting for a node (workerRunningTimeout)
 	// plus the preflight before it; the refusal itself takes about a second.
 	nativeRefusalBudget = workerRunningTimeout + 5*time.Minute
@@ -87,6 +96,7 @@ func applyRefusalFixture() {
 var _ = Describe("Migration", func() {
 	BeforeEach(resetMigrationPair)
 
+	// The engine's clone and the operator's follow preflight each refuse the table, so the spec runs both.
 	It("refuses an unlogged table before any database change and deletes cleanly", Label(nativeLabel), func() {
 		if selectedEngine() != v1beta1.MigrationEngineRPGMigrate {
 			Skip("only the native engine's clone refuses an unlogged table")
@@ -97,8 +107,7 @@ var _ = Describe("Migration", func() {
 		Expect(source).To(MatchRegexp(nativeStateNoneOwned), "native state left on the source before the spec")
 		Expect(target).To(MatchRegexp(nativeStateNoneOwned), "native state left on the target before the spec")
 
-		// Clone only: the native follow preflight refuses an unlogged table itself, so the engine would never run.
-		By("creating a native clone Migration over the unlogged table")
+		By("creating a native clone Migration over the unlogged table, which the engine's clone refuses")
 		DeferCleanup(deleteMigration, nativeRefusalName)
 		m := newMigration(nativeRefusalName, nsE2E, v1beta1.CloneOptions{})
 		create(m)
@@ -127,6 +136,43 @@ var _ = Describe("Migration", func() {
 		Expect(jobs).To(ContainElement(m.Status.JobName), "the poll never saw the refused worker Job, so it saw nothing")
 		Expect(psql(sourceCluster, nativeStateSQL)).To(Equal(source), "deletion changed the source")
 		Expect(psql(targetCluster, nativeStateSQL)).To(Equal(target), "deletion changed the target")
+
+		By("creating a native follow Migration over the unlogged table, which the operator's follow preflight refuses")
+		DeferCleanup(deleteMigration, nativeFollowRefusalName)
+		f := newFollowMigration(nativeFollowRefusalName, v1beta1.CutoverManual)
+		startNativeJobRecorder()
+		// No work volume: the operator claims one only after its preflight passes.
+		Expect(k8sClient.Create(ctx, f)).To(Succeed(), "failed to create Migration %s", f.Name)
+		f = waitTerminal(nativeFollowRefusalName, nativeRefusalBudget)
+		Expect(f.Status.Phase).To(Equal(v1beta1.PhaseFailed), "%s ended %s instead of refusing", f.Name, f.Status.Phase)
+		for _, condition := range []string{v1beta1.ConditionFailed, v1beta1.ConditionValidated} {
+			c := apimeta.FindStatusCondition(f.Status.Conditions, condition)
+			Expect(c).NotTo(BeNil(), "%s has no %s condition", f.Name, condition)
+			Expect([]any{c.Status == metav1.ConditionTrue, c.Reason, c.Message}).To(Equal([]any{
+				condition == v1beta1.ConditionFailed, nativeFollowRefusalReason, nativeFollowRefusalMessage}),
+				"%s is not refused by the follow preflight", f.Name)
+		}
+		Expect([]any{f.Status.Attempts, f.Status.JobName, f.Status.NativeJobUID, f.Status.NativePVCUID}).
+			To(Equal([]any{int32(0), "", types.UID(""), types.UID("")}),
+				"%s started a worker after its preflight refused", f.Name)
+		Expect(f.Finalizers).To(ContainElement(nativeFinalizer),
+			"%s holds no finalizer, so its release proves nothing", f.Name)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: f.Name + "-work"},
+			&corev1.PersistentVolumeClaim{}))).To(BeTrue(), "%s claimed a work volume after its preflight refused", f.Name)
+		Expect(psql(sourceCluster, nativeStateSQL)).To(Equal(source), "the follow refusal changed the source")
+		Expect(psql(targetCluster, nativeStateSQL)).To(Equal(target), "the follow refusal changed the target")
+
+		By("deleting the refused follow Migration, which must release its finalizer without an inventory or cleanup Job")
+		// deleteMigration returns once the Migration is gone, so the finalizer was released.
+		jobs = append(deleteWatchingOwnedJobs(f.Name, f.UID), nativeOwnedJobs(f.UID)...)
+		Expect(slices.ContainsFunc(jobs, func(j string) bool { return strings.HasPrefix(j, "rpgmigrate-preflight-") })).
+			To(BeTrue(), "the Job watch saw no preflight Job of %s, so it saw nothing: %v", f.Name, jobs)
+		Expect(slices.ContainsFunc(jobs, func(j string) bool {
+			return strings.HasPrefix(j, "rpgmigrate-inventory-") || strings.HasPrefix(j, "rpgmigrate-cleanup-") ||
+				j == f.Name+"-cleanup" || strings.HasPrefix(j, f.Name+"-run-")
+		})).To(BeFalse(), "deleting a follow refused at preflight ran a worker, inventory or cleanup Job: %v", jobs)
+		Expect(psql(sourceCluster, nativeStateSQL)).To(Equal(source), "the follow deletion changed the source")
+		Expect(psql(targetCluster, nativeStateSQL)).To(Equal(target), "the follow deletion changed the target")
 	})
 })
 
@@ -200,5 +246,44 @@ func TestNativeRefusalLog(t *testing.T) {
 		if refusal.MatchString(other) {
 			t.Errorf("%s matches another failure: %s", nativeRefusalLog, other)
 		}
+	}
+}
+
+// TestNativeFollowRefusalTies ties the follow refusal's expected condition and finalizer to the operator
+// source, and its unlogged table to the follow-only preflight check that refuses with the result class.
+func TestNativeFollowRefusalTies(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		src, err := os.ReadFile("../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(src)
+	}
+	preflight := read("internal/controller/native_preflight.go")
+	reconcile := read("internal/controller/native_reconcile.go")
+	refused, class, ok := strings.Cut(nativeFollowRefusalMessage, ": error class ")
+	if !ok || !strings.Contains(preflight, `errors.New("`+refused+`")`) ||
+		!strings.Contains(preflight, `fmt.Errorf("%w: error class %s", errNativePreflightTerminal, class)`) {
+		t.Errorf("internal/controller/native_preflight.go builds no message %q", nativeFollowRefusalMessage)
+	}
+	if !strings.Contains(reconcile, `reasonNativePreflightFailed = "`+nativeFollowRefusalReason+`"`) {
+		t.Errorf("internal/controller/native_reconcile.go has no reason %q", nativeFollowRefusalReason)
+	}
+	if !strings.Contains(read("internal/controller/follow.go"), `finalizerName = "`+nativeFinalizer+`"`) {
+		t.Errorf("internal/controller/follow.go has no finalizer %q", nativeFinalizer)
+	}
+	program := read("internal/native/evidence_program.py")
+	check := strings.Index(program, `c.relpersistence='u');")); checks.append('unlogged')`)
+	follow, end := strings.Index(program, "\n if follow:\n"), strings.Index(program, "\n return dump,restore,checks\n")
+	line := program[strings.LastIndex(program[:max(check, 0)], "\n")+1 : max(check, 0)]
+	if check < 0 || follow < 0 || check < follow || end < check ||
+		!strings.HasPrefix(line, "  exact_true(source.query(") ||
+		!strings.Contains(program, "RESULT='"+class+"'\n") ||
+		!strings.Contains(program, "def exact_true(rows):\n need(rows==[[b't']],RESULT)\n") {
+		t.Errorf("evidence_program.py has no follow-only unlogged check that refuses with class %q", class)
+	}
+	if !strings.Contains(nativeRefusalFixtureSQL, "CREATE UNLOGGED TABLE") {
+		t.Error("the refusal fixture creates no unlogged table for the follow preflight")
 	}
 }
