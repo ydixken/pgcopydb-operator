@@ -15,12 +15,12 @@ func (r *MigrationReconciler) finishNativeClone(ctx context.Context, m, base *v1
 		return ctrl.Result{}, errNativeCloneReport
 	}
 	entry := m.DeepCopy()
-	original, err := r.nativeQuiescentWorker(ctx, entry, worker, pvc)
+	original, err := r.nativeEngineFreeWorker(ctx, entry, worker, pvc)
 	if err != nil {
 		return ctrl.Result{}, errNativeCloneReport
 	}
-	if _, err := r.readNativeCloneReport(ctx, entry, worker, pvc); err != nil {
-		return ctrl.Result{}, err
+	if handled, result, err := r.reconcileNativeCloneReport(ctx, m, base, worker, pvc, original); handled {
+		return result, err
 	}
 	done, err := r.ensureNativeVerification(ctx, m, worker, pvc)
 	if err != nil {

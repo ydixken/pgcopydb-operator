@@ -101,8 +101,8 @@ func nativeVerificationJobUID(m *v1beta1.Migration, check string) string {
 }
 
 func (r *MigrationReconciler) nativeVerificationOriginalUnchanged(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) bool {
-	pod, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
-	return err == nil && ctx.Err() == nil && nativePreflightSamePod(original, pod) && apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) && podexec.SamePodState(original, pod, workerContainer)
+	pod, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
+	return err == nil && ctx.Err() == nil && original != nil && nativeSameWorkerPod(original, pod)
 }
 
 func (r *MigrationReconciler) readNativeVerificationCheck(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod, check string) (*nativeVerificationCapture, bool, error) {

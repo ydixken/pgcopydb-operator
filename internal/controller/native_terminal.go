@@ -7,10 +7,8 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
-	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 var errNativeFollowCompletion = errors.New("native follow completion evidence unavailable")
@@ -22,10 +20,10 @@ func (r *MigrationReconciler) readNativeFollowCompletion(ctx context.Context, m 
 		return nil, errNativeFollowCompletion
 	}
 	work, err := nativeWorkIdentity(m, pvc)
-	if err != nil || !nativeEvidenceWorkerComplete(worker) || native.ValidateCompletedClone(clone, work) != nil {
+	if err != nil || !nativeEvidenceWorkerComplete(worker) || !nativeCloneReportAdmitted(m, worker, pvc, clone) {
 		return nil, errNativeFollowCompletion
 	}
-	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
+	original, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
 	if err != nil {
 		return nil, errNativeFollowCompletion
 	}
@@ -38,8 +36,8 @@ func (r *MigrationReconciler) readNativeFollowCompletion(ctx context.Context, m 
 	if err != nil || report.Replication == nil || report.Replication.Drained == nil || !*report.Replication.Drained || report.Replication.EndPersisted == nil || !*report.Replication.EndPersisted {
 		return nil, errNativeFollowCompletion
 	}
-	confirmed, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
-	if err != nil || ctx.Err() != nil || !nativePreflightSamePod(original, confirmed) || !apiequality.Semantic.DeepEqual(original.Spec, confirmed.Spec) || !podexec.SamePodState(original, confirmed, workerContainer) {
+	confirmed, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
+	if err != nil || ctx.Err() != nil || !nativeSameWorkerPod(original, confirmed) {
 		return nil, errNativeFollowCompletion
 	}
 	return observation, nil

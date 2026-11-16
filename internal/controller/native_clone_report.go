@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -10,7 +11,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 var errNativeCloneReport = errors.New("native clone completion report unavailable")
@@ -25,7 +26,7 @@ func (r *MigrationReconciler) readNativeCloneReport(ctx context.Context, m *v1be
 	}
 	image := runnerImageFor(m, r.RPGMigrateRunnerImage)
 	_, original, err := r.nativeCompletionCurrent(ctx, m, worker, pvc, nil)
-	if err != nil {
+	if err != nil || nativePodless(original) {
 		return nil, errNativeCloneReport
 	}
 	work, err := nativeWorkIdentity(m, pvc)
@@ -43,9 +44,43 @@ func (r *MigrationReconciler) readNativeCloneReport(ctx context.Context, m *v1be
 		return nil, errNativeCloneReport
 	}
 	confirmed, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
-	if err != nil || ctx.Err() != nil || !nativePreflightSamePod(original, confirmed) ||
-		!apiequality.Semantic.DeepEqual(original.Spec, confirmed.Spec) || !podexec.SamePodState(original, confirmed, workerContainer) {
+	if err != nil || ctx.Err() != nil || !nativeSameWorkerPod(original, confirmed) {
 		return nil, errNativeCloneReport
 	}
 	return report, nil
+}
+
+// nativeCloneReportReceipted reports that an earlier pass read and validated worker's completed-clone report.
+func nativeCloneReportReceipted(m *v1beta1.Migration, worker *batchv1.Job) bool {
+	return m != nil && worker != nil && worker.UID != "" && m.Status.NativeReportJobUID == string(worker.UID) && m.Status.NativeJobUID == string(worker.UID)
+}
+
+// reconcileNativeCloneReport is the finish column of the W table for a Complete worker: go with the
+// report receipt, read the report from the worker's pod and record the receipt, or count an attempt
+// whose pod went before its report was read. original is the engine-free anchor of this pass.
+func (r *MigrationReconciler) reconcileNativeCloneReport(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) (bool, ctrl.Result, error) {
+	if nativeCloneReportReceipted(m, worker) {
+		return false, ctrl.Result{}, nil
+	}
+	desired := m.DeepCopy()
+	if nativePodless(original) {
+		// Without a pod there is no log, so no pass can ever read this report; a resumed attempt proves completion again.
+		r.countNativeAttempt(desired, fmt.Sprintf("Native worker Job %s completed, but its pod was gone before its report was read", worker.Name))
+		desired.Status.ObservedGeneration = desired.Generation
+	} else {
+		if _, err := r.readNativeCloneReport(ctx, m, worker, pvc); err != nil {
+			return true, ctrl.Result{}, err
+		}
+		desired.Status.NativeReportJobUID = string(worker.UID)
+	}
+	return r.patchNativeWorkerState(ctx, m, base, desired)
+}
+
+// nativeCloneReportAdmitted accepts the completed-clone report of this pass, or none once its receipt is recorded.
+func nativeCloneReportAdmitted(m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, clone *native.Report) bool {
+	if clone == nil {
+		return nativeCloneReportReceipted(m, worker)
+	}
+	work, err := nativeWorkIdentity(m, pvc)
+	return err == nil && native.ValidateCompletedClone(clone, work) == nil
 }

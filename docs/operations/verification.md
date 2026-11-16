@@ -48,6 +48,13 @@ Read the `Verified` condition and the compare Job logs before you act.
 For follow migrations, the schema and data compares run last, after the operator verifies the drain and drops the slot.
 A rehearsal is the one compare that runs earlier, and for that reason it reports no verdict.
 
+## Native completion
+
+With `spec.engine: rpgmigrate`, the operator reads the completed-clone report of the worker one time, and writes the UID of the worker Job to `status.nativeReportJobUID`.
+After that, the compares and the completion do not need the worker pod.
+If the worker pod goes before the operator reads the report, no pass can read it.
+Then the attempt counts as failed, and the retry gate decides on the next attempt.
+
 ## Rehearsal
 
 On a live migration, the drain verify runs `pgcopydb compare data` inside the write-downtime window ([runbook](live-migration.md#manual-cutover-runbook)).
@@ -225,7 +232,7 @@ The operator reads these lines from the Job's log into `status.verificationProgr
 
 With `spec.engine: rpgmigrate`, only the `data` item exists.
 The native engine has no rehearsal, and its drain is proved without a compare, so it leaves no `drain` item.
-The native compare helper checks every progress line of `rpgmigrate compare data`, but its Job logs only its sealed result.
+The native compare helper verifies every progress line of `rpgmigrate compare data`, but its Job logs only its sealed result.
 The operator therefore reads no sample while the compare runs.
 After the helper succeeds, the operator records the final sample from that result: `final` is true, every planned table and byte is compared, and `inFlight` is empty.
 A compare that the operator refuses leaves no item.

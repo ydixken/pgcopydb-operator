@@ -198,7 +198,7 @@ func (r *MigrationReconciler) disposeRefusedNativeHelper(ctx context.Context, m 
 }
 
 func (r *MigrationReconciler) readNativeOwnedInventory(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (native.AdmittedOwnedState, error) {
-	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
+	original, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
 	if err != nil {
 		return native.AdmittedOwnedState{}, errNativeCleanupFlow
 	}
@@ -236,7 +236,7 @@ func (r *MigrationReconciler) captureNativeStateCompletion(ctx context.Context, 
 	if m == nil || worker == nil || pvc == nil || !nativeControlValidEnd(nativeControlEnd(m)) || !nativeEvidenceWorkerComplete(worker) {
 		return nil, false, errNativeCleanupFlow
 	}
-	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
+	original, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
 	if err != nil {
 		return nil, false, errNativeCleanupFlow
 	}
@@ -271,7 +271,7 @@ func (r *MigrationReconciler) ensureNativeCleanup(ctx context.Context, m *v1beta
 	if r.NativeJobs == nil || m == nil || worker == nil || pvc == nil || !followEnabled(m) || m.Spec.Suspend || !m.DeletionTimestamp.IsZero() || !nativeControlValidEnd(nativeControlEnd(m)) || !nativeEvidenceWorkerComplete(worker) {
 		return false, errNativeCleanupFlow
 	}
-	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
+	original, err := r.nativeEngineFreeWorker(ctx, m, worker, pvc)
 	if err != nil {
 		return false, errNativeCleanupFlow
 	}

@@ -95,6 +95,8 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 	worker.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
 	m.Status.NativeJobSHA256 = nativeTestDigest(t, worker)
+	// Completion tests start after the report pass; dropReportReceipt goes back before it.
+	m.Status.NativeReportJobUID = string(worker.UID)
 	pod := nativeRecoveryTestPod(worker, 0)
 	pod.Labels = maps.Clone(worker.Spec.Template.Labels)
 	pod.Labels[batchv1.ControllerUidLabel] = string(worker.UID)
@@ -140,6 +142,17 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 		}
 	})
 	return f
+}
+
+// dropReportReceipt returns the fixture to a Complete worker whose report no pass has read yet.
+func (f *nativeCloneFixture) dropReportReceipt() {
+	f.t.Helper()
+	m := f.current()
+	m.Status.NativeReportJobUID = ""
+	if err := f.store.Status().Update(context.Background(), m); err != nil {
+		f.t.Fatal(err)
+	}
+	f.m = f.current()
 }
 
 func (f *nativeCloneFixture) encodeReport() {
