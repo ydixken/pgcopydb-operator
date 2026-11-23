@@ -402,7 +402,8 @@ The attempt starts when the origin is free.
 - The lag is above `follow.maxCatchupLag`.
 - Only one below-threshold sample has arrived.
 - No replication sample exists yet.
-- With `spec.follow.walWorkers` above 1, the source has the slots of some WAL workers, but not of all of them.
+- With `spec.follow.walWorkers` above 1, the base copy finished, and the source has the slots of some WAL workers, but not of all of them.
+  Before the base copy finishes, a missing slot gives no sample.
 
 With one below-threshold sample, the reason is `ConfirmingCatchUp`.
 That reason clears on the next sample.
@@ -759,10 +760,13 @@ A verify Job that fails runs once more before the Migration fails, so a refusal 
 
 ### Phase `Failed` with reason `DrainIncomplete`
 
-Phase `Failed` with reason `DrainIncomplete` means that the verify Job found changes below the cutover LSN that the target does not have.
-With `spec.follow.walWorkers` above 1, a WAL worker that has no replication origin on the target also causes this failure.
-In that case, the Job stops before the compare, and its log shows the `psql` error that names the origin.
-In the other cases, `pgcopydb compare data` reported differing tables.
+Phase `Failed` with reason `DrainIncomplete` has two causes:
+
+- The verify Job found changes below the cutover LSN that the target does not have.
+- With `spec.follow.walWorkers` above 1, a WAL worker has no replication origin on the target, and the Job compares no data.
+
+For a missing origin, the Job stops before the compare, and its log shows the `psql` error that names the origin.
+For missing changes, `pgcopydb compare data` reported differing tables.
 The typical cause is a crash inside the drain window.
 After such a crash, pgcopydb `--resume` exits 0 without replaying.
 With a runner older than `0.18.98.g944abcc`, apply that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).

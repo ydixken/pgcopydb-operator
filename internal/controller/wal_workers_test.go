@@ -90,7 +90,7 @@ func TestWalWorkersValidation(t *testing.T) {
 	if _, err := buildJob(m, "runner", 1); err != nil {
 		t.Fatal(err)
 	}
-	// Admission now rejects the suffix on every slotName; one admitted before keeps its single stream.
+	// Admission rejects the suffix on every slotName; one admitted before that rule keeps its single stream.
 	m = walWorkersMigration()
 	m.Spec.Follow.WalWorkers = 1
 	m.Spec.Follow.HighTrafficTables = nil

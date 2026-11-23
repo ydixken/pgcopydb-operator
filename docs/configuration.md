@@ -256,7 +256,9 @@ Admission rejects a spec that breaks these rules.
 The controller does the same checks when it builds the worker Job, and it fails the Migration with `InvalidSpec`.
 
 Admission also rejects a `slotName` that ends in `_w<digits>` or `_t<digits>` when `walWorkers` is unset or 1.
-Thus the cleanup of the WAL workers of one Migration cannot drop the slot of a different Migration.
+Thus the cleanup of the WAL workers of one Migration cannot drop the slot of a different Migration that admission accepted with this rule.
+A Migration that admission accepted before this rule can have a `slotName` that ends in `_w<digits>` or `_t<digits>`.
+If such a Migration uses the same source, the cleanup can drop its slot.
 The controller does this check only when `walWorkers` is above 1.
 Thus a Migration that admission accepted before this rule continues to run with one stream.
 On Kubernetes 1.30 and later, you can also change the other fields of that Migration, for example `cutover.approved`.
@@ -264,7 +266,7 @@ On Kubernetes 1.30 and later, you can also change the other fields of that Migra
 Admission and the controller do not do the checks that follow.
 pgcopydb does them at the start, and the first attempt fails when one of them is not true:
 
-- The source MUST run PostgreSQL 12 or later.
+- The source MUST run PostgreSQL 13 or later, because PostgreSQL 12 cannot publish partitioned tables.
 - Each `highTrafficTables` entry MUST match a published table.
 - Two entries MUST NOT be in the same partition family (a partitioned table and its partitions).
 - Each worker MUST get at least one table.

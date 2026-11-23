@@ -766,7 +766,7 @@ Source instance:
 - N + 1 free WAL senders (`max_wal_senders`) during the base copy.
   The connection that holds the snapshot stays open until the base copy ends.
   After the base copy, the workers use N WAL senders.
-- PostgreSQL 12 or later.
+- PostgreSQL 13 or later, because PostgreSQL 12 cannot publish partitioned tables.
   Preflight does not check the version.
   pgcopydb refuses an older source when the first attempt starts.
 

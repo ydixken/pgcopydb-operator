@@ -695,7 +695,8 @@ var _ = Describe("Migration CRD validation", func() {
 
 	// spec.follow is immutable, so without CRD validation ratcheting a Migration
 	// stored before the suffix rule could never change again, not even to approve cutover.
-	It("ratchets the slotName suffix rule for a Migration stored before it", func() {
+	// Serial: it edits the shared CRD, which would break specs that run in parallel.
+	It("ratchets the slotName suffix rule for a Migration stored before it", Serial, func() {
 		crdKey := types.NamespacedName{Name: "migrations.pgcopydb-operator.io"}
 		getCRD := func() *unstructured.Unstructured {
 			crd := &unstructured.Unstructured{}
