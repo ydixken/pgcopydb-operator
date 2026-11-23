@@ -199,6 +199,8 @@ _Appears in:_
 | `wal2jsonNumericAsString` _boolean_ | wal2jsonNumericAsString makes wal2json emit numeric values as JSON<br />strings (--wal2json-numeric-as-string), preserving precision a JSON<br />number would lose. Only meaningful with plugin wal2json; admission<br />rejects it under any other plugin. |  | Optional: \{\} <br /> |
 | `replayNoOpUpdates` _boolean_ | replayNoOpUpdates replays UPDATEs that change no columns<br />(--replay-no-op-updates), needed when target triggers must fire. |  | Optional: \{\} <br /> |
 | `applyGroupTransactions` _integer_ | applyGroupTransactions caps how many source transactions apply commits<br />in one target transaction (PGCOPYDB_APPLY_GROUP_TXNS). Unset leaves<br />pgcopydb's default of 100; 1 commits every source transaction on its own. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `walWorkers` _integer_ | walWorkers is the number of parallel CDC streams pgcopydb runs, each with<br />its own replication slot and target replication origin. Unset or 1 keeps<br />the single stream. It reaches pgcopydb as PGCOPYDB_WAL_WORKERS. |  | Maximum: 16 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `highTrafficTables` _string array_ | highTrafficTables lists schema-qualified tables that each get a WAL<br />worker of their own and never share one with each other. |  | MaxItems: 16 <br />items:Pattern: `^[a-z_][a-z0-9_]\{0,62\}\.[a-z_][a-z0-9_]\{0,62\}$` <br />Optional: \{\} <br /> |
 | `allowMissingReplicaIdentity` _string array_ | allowMissingReplicaIdentity acknowledges tables the preflight replica-identity audit<br />would otherwise fail on, as schema-qualified names exactly as the preflight prints them<br />("*" covers every offender). UPDATE or DELETE on an acknowledged table still fails on the<br />source at write time, so acknowledge only read-only or insert-only ones. Immutable with follow. |  | Optional: \{\} <br /> |
 | `unloggedTables` _[UnloggedTable](#unloggedtable) array_ | unloggedTables acknowledges tables that MUST NOT participate in follow<br />or content verification. SchemaOnly restores an empty table. CopyOnce<br />copies its initial rows, which can become stale before cutover.<br />Tables MUST be ordinary, non-partitioned UNLOGGED source tables.<br />Immutable with follow. See docs/configuration.md. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
 | `insertOnlyTables` _string array_ | insertOnlyTables copies the initial rows and follows INSERTs only.<br />UPDATE, DELETE and TRUNCATE are not replicated. The operator excludes<br />these tables from content verification and reports the partial policy.<br />Tables MUST be ordinary, non-partitioned LOGGED source tables.<br />This does not change allowMissingReplicaIdentity. |  | MaxItems: 64 <br />items:Pattern: `^[a-z_][a-z0-9_]\{0,62\}\.[a-z_][a-z0-9_]\{0,62\}$` <br />Optional: \{\} <br /> |
@@ -395,6 +397,27 @@ _Appears in:_
 | `writeLSN` _string_ | writeLSN is the walsender's write position, with slot confirmed-flush fallback<br />when the migration role cannot read it. |  | Optional: \{\} <br /> |
 | `replayLSN` _string_ | replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.<br />It may include certified idle WAL beyond the last applied data transaction.<br />Post-cutover drain verification, not this position, proves target application. |  | Optional: \{\} <br /> |
 | `endpos` _string_ | endpos is the cutover LSN once set. |  | Optional: \{\} <br /> |
+| `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN. |  | Optional: \{\} <br /> |
+| `workers` _[ReplicationWorkerStatus](#replicationworkerstatus) array_ | workers holds one entry per replication slot when walWorkers is above 1. |  | Optional: \{\} <br /> |
+
+
+#### ReplicationWorkerStatus
+
+
+
+ReplicationWorkerStatus is the replay position of one WAL worker slot when
+walWorkers is above 1. The aggregate ReplicationStatus fields hold the
+minimum over all slots.
+
+
+
+_Appears in:_
+- [ReplicationStatus](#replicationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `slotName` _string_ | slotName is the replication slot of this worker. |  | Required: \{\} <br /> |
+| `replayLSN` _string_ | replayLSN is source-visible replay feedback for this slot. |  | Optional: \{\} <br /> |
 | `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN. |  | Optional: \{\} <br /> |
 
 

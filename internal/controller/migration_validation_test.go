@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -389,6 +390,10 @@ var _ = Describe("Migration CRD validation", func() {
 		changed.Spec.Follow.Enabled = false
 		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
 
+		changed = fresh()
+		changed.Spec.Follow.WalWorkers = 2
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
+
 		// Control: clone tuning and the cutover trigger stay mutable.
 		changed = fresh()
 		changed.Spec.Clone.TableJobs = 8
@@ -557,6 +562,89 @@ var _ = Describe("Migration CRD validation", func() {
 		},
 		allDatabasesEntries(v1beta1.GroupVersion),
 		allDatabasesEntries(v1alpha1.GroupVersion),
+	)
+
+	// Unstructured, so one table covers both served versions; the maps hold
+	// JSON types (int64, []any) because SetNestedMap deep-copies them.
+	walWorkersEntries := func(gv schema.GroupVersion) []TableEntry {
+		tables := func(names ...string) []any {
+			out := make([]any, len(names))
+			for i, n := range names {
+				out[i] = n
+			}
+			return out
+		}
+		follow := func(extra map[string]any) map[string]any {
+			f := map[string]any{"enabled": true}
+			maps.Copy(f, extra)
+			return f
+		}
+		ww := func(n int64, extra map[string]any) map[string]any {
+			f := follow(extra)
+			f["walWorkers"] = n
+			return f
+		}
+		hot := func(names ...string) map[string]any { return map[string]any{"highTrafficTables": tables(names...)} }
+		slotLen := func(n int) map[string]any { return map[string]any{"slotName": strings.Repeat("a", n)} }
+		const r1 = "walWorkers above 1 requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or insertOnlyTables"
+		const r2 = "walWorkers above 1 requires a slotName of at most 51 characters"
+		const r3 = "highTrafficTables requires walWorkers above 1 and at most walWorkers entries"
+		entry := func(desc, name string, spec map[string]any, wantErr string) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-ww-"+name+"-"+gv.Version, spec, wantErr)
+		}
+		return []TableEntry{
+			entry("two workers", "two", ww(2, nil), ""),
+			entry("sixteen workers", "max", ww(16, nil), ""),
+			entry("zero workers", "zero", ww(0, nil), "should be greater than or equal to 1"),
+			entry("seventeen workers", "over", ww(17, nil), "should be less than or equal to 16"),
+			entry("workers with follow disabled", "disabled", ww(2, map[string]any{"enabled": false}), r1),
+			entry("workers with wal2json", "wal2json", ww(2, map[string]any{"plugin": v1beta1.PluginWal2json}), r1),
+			entry("workers with explicit pgoutput", "pgoutput", ww(2, map[string]any{"plugin": v1beta1.PluginPGOutput}), ""),
+			entry("workers with a publication", "pub", ww(2, map[string]any{"publication": "foreign"}), r1),
+			entry("workers with unloggedTables", "unlogged", ww(2, map[string]any{
+				"unloggedTables": []any{map[string]any{"table": "app.cache", "mode": v1beta1.UnloggedSchemaOnly}},
+			}), r1),
+			entry("workers with insertOnlyTables", "insert-only", ww(2, map[string]any{
+				"insertOnlyTables": tables("app.events"),
+			}), r1),
+			// Control: the partial table policies stay legal on the single stream.
+			entry("one worker with insertOnlyTables", "one-insert-only", ww(1, map[string]any{
+				"insertOnlyTables": tables("app.events"),
+			}), ""),
+			entry("workers with a 52-character slot", "slot-52", ww(2, slotLen(52)), r2),
+			entry("workers with a 51-character slot", "slot-51", ww(2, slotLen(51)), ""),
+			entry("one worker with a 52-character slot", "one-slot-52", ww(1, slotLen(52)), ""),
+			entry("high-traffic tables without workers", "hot-unset",
+				follow(hot("app.events")), r3),
+			entry("high-traffic tables with one worker", "hot-one", ww(1, hot("app.events")), r3),
+			entry("more high-traffic tables than workers", "hot-over",
+				ww(2, hot("app.a", "app.b", "app.c")), r3),
+			entry("as many high-traffic tables as workers", "hot-ok",
+				ww(2, hot("app.a", "app.b")), ""),
+			entry("uppercase high-traffic table", "hot-upper", ww(2, hot("app.Events")), "should match"),
+			entry("high-traffic table without schema", "hot-bare", ww(2, hot("events")), "should match"),
+			entry("duplicate high-traffic tables", "hot-dup",
+				ww(2, hot("app.a", "app.a")), "Duplicate value"),
+		}
+	}
+	DescribeTable("walWorkers and highTrafficTables rules",
+		func(gv schema.GroupVersion, name string, follow map[string]any, wantErr string) {
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration(name))
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			Expect(unstructured.SetNestedMap(u.Object, follow, "spec", "follow")).To(Succeed())
+			err = k8sClient.Create(ctx, u)
+			if wantErr == "" {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring(wantErr)))
+		},
+		walWorkersEntries(v1beta1.GroupVersion),
+		walWorkersEntries(v1alpha1.GroupVersion),
 	)
 
 	// The rule sits on MigrationSpec, not CloneOptions: a transition rule on

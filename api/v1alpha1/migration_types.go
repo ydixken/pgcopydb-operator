@@ -372,6 +372,9 @@ const PluginWal2json = "wal2json"
 // +kubebuilder:validation:XValidation:rule="!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString) || (has(self.plugin) && self.plugin == 'wal2json')",message="wal2jsonNumericAsString configures the wal2json plugin and does nothing under any other; set plugin: wal2json or drop the field"
 // +kubebuilder:validation:XValidation:rule="!has(self.unloggedTables) || size(self.unloggedTables) == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && !has(self.slotName))",message="unloggedTables requires pgoutput follow with an operator-managed slot and publication"
 // +kubebuilder:validation:XValidation:rule="!has(self.insertOnlyTables) || size(self.insertOnlyTables) == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && !has(self.slotName))",message="insertOnlyTables requires pgoutput follow with an operator-managed slot and publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.walWorkers) || self.walWorkers <= 1 || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables) == 0) && (!has(self.insertOnlyTables) || size(self.insertOnlyTables) == 0))",message="walWorkers above 1 requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or insertOnlyTables"
+// +kubebuilder:validation:XValidation:rule="!has(self.walWorkers) || self.walWorkers <= 1 || !has(self.slotName) || size(self.slotName) <= 51",message="walWorkers above 1 requires a slotName of at most 51 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.highTrafficTables) || size(self.highTrafficTables) == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables) <= self.walWorkers)",message="highTrafficTables requires walWorkers above 1 and at most walWorkers entries"
 type FollowOptions struct {
 	// enabled turns the migration into a live one.
 	// +optional
@@ -415,6 +418,22 @@ type FollowOptions struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	ApplyGroupTransactions int32 `json:"applyGroupTransactions,omitempty"`
+
+	// walWorkers is the number of parallel CDC streams pgcopydb runs, each with
+	// its own replication slot and target replication origin. Unset or 1 keeps
+	// the single stream. It reaches pgcopydb as PGCOPYDB_WAL_WORKERS.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=16
+	// +optional
+	WalWorkers int32 `json:"walWorkers,omitempty"`
+
+	// highTrafficTables lists schema-qualified tables that each get a WAL
+	// worker of their own and never share one with each other.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$`
+	// +listType=set
+	// +optional
+	HighTrafficTables []string `json:"highTrafficTables,omitempty"`
 
 	// allowMissingReplicaIdentity acknowledges tables the preflight replica-identity audit
 	// would otherwise fail on, as schema-qualified names exactly as the preflight prints them
@@ -686,6 +705,26 @@ type ReplicationStatus struct {
 	// endpos is the cutover LSN once set.
 	// +optional
 	Endpos string `json:"endpos,omitempty"`
+	// lagBytes is the byte distance between the source WAL head and replayLSN.
+	// +optional
+	LagBytes *int64 `json:"lagBytes,omitempty"`
+	// workers holds one entry per replication slot when walWorkers is above 1.
+	// +listType=map
+	// +listMapKey=slotName
+	// +optional
+	Workers []ReplicationWorkerStatus `json:"workers,omitempty"`
+}
+
+// ReplicationWorkerStatus is the replay position of one WAL worker slot when
+// walWorkers is above 1. The aggregate ReplicationStatus fields hold the
+// minimum over all slots.
+type ReplicationWorkerStatus struct {
+	// slotName is the replication slot of this worker.
+	// +required
+	SlotName string `json:"slotName"`
+	// replayLSN is source-visible replay feedback for this slot.
+	// +optional
+	ReplayLSN string `json:"replayLSN,omitempty"`
 	// lagBytes is the byte distance between the source WAL head and replayLSN.
 	// +optional
 	LagBytes *int64 `json:"lagBytes,omitempty"`
