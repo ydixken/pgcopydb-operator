@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -38,6 +40,8 @@ import (
 
 // testOwnerRole is the role the ownerAfterRestore rules are exercised with.
 const testOwnerRole = "app_owner"
+
+const reservedSlotSuffix = "slotName must not end in _w<digits> or _t<digits>"
 
 // Exercises the CRD CEL rules through the envtest apiserver: the schema in
 // config/crd/bases is what real clusters enforce, so this is where a broken
@@ -589,6 +593,7 @@ var _ = Describe("Migration CRD validation", func() {
 		const r1 = "walWorkers above 1 requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or insertOnlyTables"
 		const r2 = "walWorkers above 1 requires a slotName of at most 51 characters"
 		const r3 = "highTrafficTables requires walWorkers above 1 and at most walWorkers entries"
+		slotNamed := func(name string) map[string]any { return map[string]any{"slotName": name} }
 		entry := func(desc, name string, spec map[string]any, wantErr string) TableEntry {
 			return Entry(gv.Version+": "+desc, gv, "cel-ww-"+name+"-"+gv.Version, spec, wantErr)
 		}
@@ -625,6 +630,15 @@ var _ = Describe("Migration CRD validation", func() {
 			entry("high-traffic table without schema", "hot-bare", ww(2, hot("events")), "should match"),
 			entry("duplicate high-traffic tables", "hot-dup",
 				ww(2, hot("app.a", "app.a")), "Duplicate value"),
+			// The worker suffix rule holds whatever walWorkers is, so a sweep never matches another base slot.
+			entry("single-stream slot ending in _w1", "w1-unset", follow(slotNamed("foo_w1")), reservedSlotSuffix),
+			entry("single-stream slot ending in _t12", "t12-unset", follow(slotNamed("foo_t12")), reservedSlotSuffix),
+			entry("workers with a slot ending in _w1", "w1-two", ww(2, slotNamed("foo_w1")), reservedSlotSuffix),
+			entry("workers with a slot ending in _t12", "t12-two", ww(2, slotNamed("foo_t12")), reservedSlotSuffix),
+			entry("workers with a slot ending in _w", "w-bare", ww(2, slotNamed("foo_w")), ""),
+			entry("workers with a slot ending in _wx", "wx", ww(2, slotNamed("foo_wx")), ""),
+			entry("workers with a slot ending in _w1x", "w1x", ww(2, slotNamed("foo_w1x")), ""),
+			entry("workers with slot w1", "w1-only", ww(2, slotNamed("w1")), ""),
 		}
 	}
 	DescribeTable("walWorkers and highTrafficTables rules",
@@ -646,6 +660,106 @@ var _ = Describe("Migration CRD validation", func() {
 		walWorkersEntries(v1beta1.GroupVersion),
 		walWorkersEntries(v1alpha1.GroupVersion),
 	)
+
+	walWorkersAllDatabasesEntries := func(gv schema.GroupVersion) []TableEntry {
+		entry := func(desc, name string, workers int32, wantErr bool) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-ww-alldb-"+name+"-"+gv.Version, workers, wantErr)
+		}
+		return []TableEntry{
+			entry("two workers", "two", 2, true),
+			entry("one worker", "one", 1, false),
+		}
+	}
+	DescribeTable("walWorkers with allDatabases",
+		func(gv schema.GroupVersion, name string, workers int32, wantErr bool) {
+			m := validMigration(name)
+			m.Spec.Clone.AllDatabases = true
+			// Follow stays disabled with one worker, which allDatabases needs.
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: workers > 1, WalWorkers: workers}
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(m)
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			err = k8sClient.Create(ctx, u)
+			if !wantErr {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring("follow.walWorkers above 1 cannot be combined with clone.allDatabases")))
+		},
+		walWorkersAllDatabasesEntries(v1beta1.GroupVersion),
+		walWorkersAllDatabasesEntries(v1alpha1.GroupVersion),
+	)
+
+	// spec.follow is immutable, so without CRD validation ratcheting a Migration
+	// stored before the suffix rule could never change again, not even to approve cutover.
+	It("ratchets the slotName suffix rule for a Migration stored before it", func() {
+		crdKey := types.NamespacedName{Name: "migrations.pgcopydb-operator.io"}
+		getCRD := func() *unstructured.Unstructured {
+			crd := &unstructured.Unstructured{}
+			crd.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition",
+			})
+			ExpectWithOffset(1, k8sClient.Get(ctx, crdKey, crd)).To(Succeed())
+			return crd
+		}
+		// Retried, as the apiserver also writes the CRD status.
+		putSpec := func(spec any) {
+			Eventually(func() error {
+				latest := getCRD()
+				latest.Object["spec"] = runtime.DeepCopyJSONValue(spec)
+				return k8sClient.Update(ctx, latest)
+			}).WithTimeout(30 * time.Second).Should(Succeed())
+		}
+		crd := getCRD()
+		original := runtime.DeepCopyJSONValue(crd.Object["spec"])
+		DeferCleanup(func() { putSpec(original) })
+
+		versions, _, err := unstructured.NestedSlice(crd.Object, "spec", "versions")
+		Expect(err).NotTo(HaveOccurred())
+		dropped := 0
+		for _, v := range versions {
+			path := []string{"schema", "openAPIV3Schema", "properties", "spec", "properties", "follow", "x-kubernetes-validations"}
+			rules, _, err := unstructured.NestedSlice(v.(map[string]any), path...)
+			Expect(err).NotTo(HaveOccurred())
+			kept := []any{}
+			for _, r := range rules {
+				if strings.Contains(r.(map[string]any)["rule"].(string), "self.slotName.matches") {
+					dropped++
+					continue
+				}
+				kept = append(kept, r)
+			}
+			Expect(unstructured.SetNestedSlice(v.(map[string]any), kept, path...)).To(Succeed())
+		}
+		Expect(dropped).To(Equal(len(versions)), "every served version must carry the rule")
+		Expect(unstructured.SetNestedSlice(crd.Object, versions, "spec", "versions")).To(Succeed())
+		putSpec(crd.Object["spec"])
+
+		m := validMigration("cel-ratchet-suffix")
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "orders_w1"}
+		Eventually(func() error { return k8sClient.Create(ctx, m.DeepCopy()) }).
+			WithTimeout(30 * time.Second).Should(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		putSpec(original)
+		probe := validMigration("cel-ratchet-probe")
+		probe.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "orders_w2"}
+		Eventually(func(g Gomega) {
+			err := k8sClient.Create(ctx, probe.DeepCopy())
+			if err == nil {
+				_ = k8sClient.Delete(ctx, probe)
+			}
+			g.Expect(err).To(MatchError(ContainSubstring(reservedSlotSuffix)))
+		}).WithTimeout(30 * time.Second).Should(Succeed())
+
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got)).To(Succeed())
+		got.Spec.Cutover.Approved = true
+		Expect(k8sClient.Update(ctx, got)).To(Succeed())
+	})
 
 	// The rule sits on MigrationSpec, not CloneOptions: a transition rule on
 	// clone is skipped when either side of the update leaves spec.clone out.

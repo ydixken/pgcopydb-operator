@@ -18,11 +18,16 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
+
+// workerSuffix is the name tail of a WAL worker slot, origin or publication. Admission
+// rejects it on every slotName; the controller only with walWorkers above 1, so older objects keep running.
+var workerSuffix = regexp.MustCompile(`_[wt][0-9]+$`)
 
 // validateWalWorkers repeats the walWorkers admission rules for objects stored
 // under an older CRD; the error becomes a terminal InvalidSpec.
@@ -41,6 +46,12 @@ func validateWalWorkers(m *v1beta1.Migration) error {
 		}
 		if len(f.SlotName) > 51 {
 			return fmt.Errorf("walWorkers above 1 requires a slotName of at most 51 characters")
+		}
+		if workerSuffix.MatchString(f.SlotName) {
+			return fmt.Errorf("slotName must not end in _w<digits> or _t<digits>, which WAL workers use for their slots and publications")
+		}
+		if m.Spec.Clone.AllDatabases {
+			return fmt.Errorf("follow.walWorkers above 1 cannot be combined with clone.allDatabases")
 		}
 	}
 	if len(f.HighTrafficTables) == 0 {

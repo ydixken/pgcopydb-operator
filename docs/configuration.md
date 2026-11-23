@@ -242,9 +242,11 @@ With `walWorkers` above 1, these rules apply:
 - `spec.follow.publication` MUST be empty.
   pgcopydb creates one publication for each table, with the name `<slot>_t<table oid>`.
 - `unloggedTables` and `insertOnlyTables` MUST be empty.
+- `clone.allDatabases` MUST be `false`.
 - A set `slotName` MUST have 51 characters or fewer.
   pgcopydb adds `_w<k>` to the slot name and to the origin name of worker k.
   The operator makes a generated slot name short enough.
+- A set `slotName` MUST NOT end in `_w<digits>` or `_t<digits>`.
 
 `highTrafficTables` needs `walWorkers` above 1 and at most `walWorkers` entries.
 Each entry MUST be an exact, lowercase `schema.table` name, and each entry MUST be unique.
@@ -253,10 +255,15 @@ Preflight makes sure that each listed table exists on the source.
 Admission rejects a spec that breaks these rules.
 The controller does the same checks when it builds the worker Job, and it fails the Migration with `InvalidSpec`.
 
+Admission also rejects a `slotName` that ends in `_w<digits>` or `_t<digits>` when `walWorkers` is unset or 1.
+Thus the cleanup of the WAL workers of one Migration cannot drop the slot of a different Migration.
+The controller does this check only when `walWorkers` is above 1.
+Thus a Migration that admission accepted before this rule continues to run with one stream.
+On Kubernetes 1.30 and later, you can also change the other fields of that Migration, for example `cutover.approved`.
+
 Admission and the controller do not do the checks that follow.
 pgcopydb does them at the start, and the first attempt fails when one of them is not true:
 
-- A set `slotName` MUST NOT end in `_w<digits>` or `_t<digits>`.
 - The source MUST run PostgreSQL 12 or later.
 - Each `highTrafficTables` entry MUST match a published table.
 - Two entries MUST NOT be in the same partition family (a partitioned table and its partitions).

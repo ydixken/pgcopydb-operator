@@ -505,6 +505,9 @@ spec:
                   rule: '!has(self.highTrafficTables) || size(self.highTrafficTables)
                     == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables)
                     <= self.walWorkers)'
+                - message: slotName must not end in _w<digits> or _t<digits>, which
+                    WAL workers use for their slots and publications
+                  rule: '!has(self.slotName) || !self.slotName.matches(''_[wt][0-9]+$'')'
               preflight:
                 description: preflight tunes optional preflight gates.
                 properties:
@@ -2218,6 +2221,10 @@ spec:
                 produces no JSON verdict in this mode'
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.verification) && has(self.verification.data) && self.verification.data)'
+            - message: follow.walWorkers above 1 cannot be combined with clone.allDatabases
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers
+                > 1)'
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
@@ -3155,6 +3162,9 @@ spec:
                   rule: '!has(self.highTrafficTables) || size(self.highTrafficTables)
                     == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables)
                     <= self.walWorkers)'
+                - message: slotName must not end in _w<digits> or _t<digits>, which
+                    WAL workers use for their slots and publications
+                  rule: '!has(self.slotName) || !self.slotName.matches(''_[wt][0-9]+$'')'
               preflight:
                 description: preflight tunes optional preflight gates.
                 properties:
@@ -4868,6 +4878,10 @@ spec:
                 produces no JSON verdict in this mode'
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.verification) && has(self.verification.data) && self.verification.data)'
+            - message: follow.walWorkers above 1 cannot be combined with clone.allDatabases
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers
+                > 1)'
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)

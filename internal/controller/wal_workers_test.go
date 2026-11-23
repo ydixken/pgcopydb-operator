@@ -63,6 +63,9 @@ func TestWalWorkersValidation(t *testing.T) {
 			m.Spec.Follow.InsertOnlyTables = []string{"public.audit"}
 		}},
 		{"long slot", "at most 51", func(m *v1beta1.Migration) { m.Spec.Follow.SlotName = strings.Repeat("s", 52) }},
+		{"worker slot suffix", "must not end in _w<digits>", func(m *v1beta1.Migration) { m.Spec.Follow.SlotName = "orders_w1" }},
+		{"publication suffix", "must not end in _w<digits>", func(m *v1beta1.Migration) { m.Spec.Follow.SlotName = "orders_t12" }},
+		{"whole instance", "cannot be combined with clone.allDatabases", func(m *v1beta1.Migration) { m.Spec.Clone.AllDatabases = true }},
 		{"tables without workers", "highTrafficTables requires", func(m *v1beta1.Migration) { m.Spec.Follow.WalWorkers = 1 }},
 		{"more tables than workers", "highTrafficTables requires", func(m *v1beta1.Migration) {
 			m.Spec.Follow.WalWorkers = 2
@@ -86,6 +89,22 @@ func TestWalWorkersValidation(t *testing.T) {
 	m.Spec.Follow.SlotName = strings.Repeat("s", 51)
 	if _, err := buildJob(m, "runner", 1); err != nil {
 		t.Fatal(err)
+	}
+	// Admission now rejects the suffix on every slotName; one admitted before keeps its single stream.
+	m = walWorkersMigration()
+	m.Spec.Follow.WalWorkers = 1
+	m.Spec.Follow.HighTrafficTables = nil
+	m.Spec.Follow.SlotName = "orders_w7"
+	if _, err := buildJob(m, "runner", 1); err != nil {
+		t.Fatalf("single-stream Migration with a suffixed slot: %v", err)
+	}
+	// Generated slot names end in a checksum, never in a worker suffix.
+	for _, name := range []string{"orders-w1", "orders-t12"} {
+		m = walWorkersMigration()
+		m.Name = name
+		if slot := effectiveSlotName(m); workerSuffix.MatchString(slot) {
+			t.Errorf("generated slot %q for %q ends in a worker suffix", slot, name)
+		}
 	}
 }
 
