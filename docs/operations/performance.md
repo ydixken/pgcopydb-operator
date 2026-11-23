@@ -105,6 +105,38 @@ The after values include the SQLite batch commit:
 > These ratios are speedups of the receive window, not speedups of the end-to-end migration.
 > These individual bursts do not establish sustained throughput, and they do not measure target WAL durability waits.
 
+### WAL workers
+
+With one stream, one target connection applies all changes.
+[Apply groups](#apply-groups) decrease the commit cost of that connection, but apply, not receive, is usually the slowest step of follow.
+[`spec.follow.walWorkers`](../configuration.md#wal-workers) runs N streams, and each stream has its own apply connection.
+Thus N target connections apply changes at the same time.
+
+Use `walWorkers` when both of these conditions are true:
+
+- The lag increases while the source writes, and apply is the slowest step.
+  When receive or source decoding is the slowest step, more workers do not help.
+- The writes go to more than one table.
+  pgcopydb gives each table to one worker, so more workers do not make the apply of one table faster.
+
+Use `highTrafficTables` when a small number of tables get most of the writes.
+Each listed table then gets a worker that it does not share with another listed table.
+Without the list, pgcopydb divides the tables by their write counts in `pg_stat_user_tables`.
+These counts start at the last statistics reset, so they can be different from the current write rate.
+
+Each worker has these costs:
+
+- Every worker decodes the full WAL on the source, also the WAL of the tables of other workers.
+  Thus the decoding load on the source increases with each worker.
+  Do not set more workers than the source CPU and disk can decode.
+- Each worker slot keeps WAL on the source until that worker applies it.
+  The slowest worker sets the WAL retention and the lag that `CaughtUp` uses.
+- Each worker uses approximately two target connections.
+- The foreign-key build occurs in the cutover window ([Cutover with WAL workers](live-migration.md#cutover-with-wal-workers)).
+- Until cutover, the target can show only one part of a source transaction that changed tables of two workers.
+
+Rehearse catch-up with the intended workload and the intended number of workers.
+
 ## What the operator decides
 
 `spec.clone` fields are optional, and a zero value means the operator decides.

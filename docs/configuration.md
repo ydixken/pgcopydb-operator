@@ -211,6 +211,71 @@ Partial content comparisons cannot prove that the target applied every INSERT.
 If the origin position differs, the drain check fails and retains the slot.
 The operator does not infer a successful drain from partial checksums.
 
+## WAL workers
+
+By default, one stream receives the source changes and one connection applies them to the target.
+Set `spec.follow.walWorkers` to split the change stream into parallel WAL workers.
+Each worker has its own replication slot on the source and its own replication origin on the target.
+Each worker applies only the changes of its tables.
+
+```yaml
+spec:
+  follow:
+    enabled: true
+    walWorkers: 4          # parallel change streams, 1 to 16
+    highTrafficTables:     # each listed table gets a worker of its own
+      - app.orders
+```
+
+When `walWorkers` is unset or 1, the migration uses one stream.
+pgcopydb gives each published table to one worker.
+A partitioned table and all its partitions go to the same worker.
+Each table in `highTrafficTables` gets a different worker.
+When the list has fewer entries than `walWorkers`, no other table shares a worker with a listed table.
+pgcopydb puts the other tables on the remaining workers by their write count on the source (`n_tup_ins + n_tup_upd + n_tup_del` in `pg_stat_user_tables`).
+[Performance tuning](operations/performance.md#wal-workers) tells when to use the two fields.
+
+With `walWorkers` above 1, these rules apply:
+
+- `follow.enabled` MUST be `true`.
+- The plugin MUST be `pgoutput`.
+- `spec.follow.publication` MUST be empty.
+  pgcopydb creates one publication for each table, with the name `<slot>_t<table oid>`.
+- `unloggedTables` and `insertOnlyTables` MUST be empty.
+- A set `slotName` MUST have 51 characters or fewer.
+  pgcopydb adds `_w<k>` to the slot name and to the origin name of worker k.
+  The operator makes a generated slot name short enough.
+
+`highTrafficTables` needs `walWorkers` above 1 and at most `walWorkers` entries.
+Each entry MUST be an exact, lowercase `schema.table` name, and each entry MUST be unique.
+Preflight makes sure that each listed table exists on the source.
+
+Admission rejects a spec that breaks these rules.
+The controller does the same checks when it builds the worker Job, and it fails the Migration with `InvalidSpec`.
+
+Admission and the controller do not do the checks that follow.
+pgcopydb does them at the start, and the first attempt fails when one of them is not true:
+
+- A set `slotName` MUST NOT end in `_w<digits>` or `_t<digits>`.
+- The source MUST run PostgreSQL 12 or later.
+- Each `highTrafficTables` entry MUST match a published table.
+- Two entries MUST NOT be in the same partition family (a partitioned table and its partitions).
+- Each worker MUST get at least one table.
+  Thus `walWorkers` MUST NOT be more than the number of published tables (a partition family counts as one).
+
+Both fields are part of `spec.follow`, so they are immutable.
+To change them, create a new Migration.
+
+pgcopydb sets the table-to-worker assignment one time, at the start of the first attempt, and keeps it in its work directory.
+A retry that resumes uses the same assignment.
+Thus, a table that gets more writes later stays on its worker.
+
+With `walWorkers` above 1, the target has no foreign keys while the workers stream.
+pgcopydb creates the foreign keys after every worker reaches the cutover LSN.
+This step also checks the rows against each foreign key.
+[Cutover with WAL workers](operations/live-migration.md#cutover-with-wal-workers) describes the effect on the cutover window.
+[Prerequisites](reference/prerequisites.md#wal-workers) lists the source and target capacity that the workers need.
+
 ## Work volume
 
 `spec.workVolume` sizes the PersistentVolumeClaim that holds pgcopydb's dumps and catalogs.

@@ -21,6 +21,7 @@ See [All databases](#all-databases).
 | CREATE on the database, ownership alignment             | target | every migration  |
 | `wal_level = logical`                                   | source | follow           |
 | Free replication slot and WAL sender                    | source | follow           |
+| N slots, N + 1 WAL senders, N origins ([WAL workers](#wal-workers)) | both | `walWorkers` N above 1 |
 | `REPLICATION` role attribute                            | source | follow           |
 | CREATE on the database plus table ownership (publication) | source | follow         |
 | EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
@@ -583,7 +584,7 @@ See [All databases configuration](../configuration.md#all-databases) and [the ex
 Before the first attempt, and after the connectivity probes, the preflight Job also checks the requirements of this section:
 
 - `wal_level`.
-- Free-slot headroom.
+- Free-slot headroom, or the [WAL worker](#wal-workers) headroom.
 - `wal_sender_timeout`, which only warns.
 - The source role's REPLICATION attribute.
 - EXECUTE on the origin functions.
@@ -753,6 +754,38 @@ Schema and workload contract:
   `compare data` covers tables, not `pg_largeobject`, so `Verified` stays `True`.
   The [`limitations/large_object_change`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Sequences need no action: pgcopydb re-syncs them automatically after cutover.
+
+### WAL workers
+
+With [`spec.follow.walWorkers`](../configuration.md#wal-workers) set to a value N above 1, each worker uses its own slot, WAL sender, origin, and target connections.
+Preflight then checks these items in place of the single free-slot check.
+
+Source instance:
+
+- N free replication slots (`max_replication_slots`).
+- N + 1 free WAL senders (`max_wal_senders`) during the base copy.
+  The connection that holds the snapshot stays open until the base copy ends.
+  After the base copy, the workers use N WAL senders.
+- PostgreSQL 12 or later.
+  Preflight does not check the version.
+  pgcopydb refuses an older source when the first attempt starts.
+
+Source role:
+
+- The role MUST be able to create one publication for each published table.
+  These are the same rights as for the automatic publication: CREATE on the source database and ownership of each published table.
+  The role needs no other rights.
+
+Target instance:
+
+- N free replication origins.
+  Up to PostgreSQL 17, `max_replication_slots` sets the origin limit.
+  On PostgreSQL 18 and later, `max_active_replication_origins` sets it.
+- Approximately 2N connections for apply, two for each worker, plus the table and index jobs of the clone.
+  Include them in `max_connections`.
+  Preflight does not check the connection count.
+
+Preflight also makes sure that the pgcopydb of the runner image lists `--wal-workers`, and that each `highTrafficTables` entry exists on the source.
 
 ## Superuser remediation (`superuserSecretRef`)
 

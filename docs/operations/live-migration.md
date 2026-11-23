@@ -226,6 +226,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 
 4. When the approval and the two-sample `CaughtUp` verdict both hold, the operator sets the cutover LSN with pgcopydb `sentinel set endpos --current`.
     The worker then drains the remaining changes, syncs sequences, and exits.
+    With WAL workers, the worker also creates the foreign keys before it exits ([Cutover with WAL workers](#cutover-with-wal-workers)).
     The phase is `CuttingOver`.
 
 5. A drain verification Job (`<name>-verify`) proves the drain on the target.
@@ -271,6 +272,29 @@ Further specs require the target to match the content of the source after these 
 
 The guarantee stops at the freeze, because the source is silent from step 2 onward.
 [Automatic mode](#automatic-mode) below carries the same warning for the mode that skips approval.
+
+### Cutover with WAL workers
+
+With [`spec.follow.walWorkers`](../configuration.md#wal-workers) above 1, step 4 of the runbook has more work:
+
+1. Each worker applies its changes up to the cutover LSN.
+   Then it moves its replication origin to the cutover LSN, also when its tables got no changes.
+1. After every worker reaches the cutover LSN, pgcopydb creates the foreign keys on the target.
+   This step also checks the rows against each foreign key.
+   The target has no foreign keys before this step.
+1. pgcopydb syncs the sequences and exits.
+
+Thus the cutover window includes the foreign-key build.
+The size of the tables that have foreign keys sets its duration.
+Measure the build in a test migration of the same data, and include it in the write-downtime window.
+During the build, the phase stays `CuttingOver`, and the replay position already equals the cutover LSN.
+Thus the `PgcopydbMigrationCutoverStalled` alert does not fire during the build.
+Use the worker logs to monitor the build.
+
+pgcopydb exits with 0 only when every worker reached the same cutover LSN, and pgcopydb created the foreign keys and synced the sequences.
+When the run stops before that, pgcopydb exits with an error and logs that the foreign keys are pending.
+In step 5, the `<name>-verify` Job reads the replication origin of every worker.
+The fast path passes only when every origin is on the cutover LSN.
 
 ## Automatic mode
 
