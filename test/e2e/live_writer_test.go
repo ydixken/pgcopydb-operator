@@ -240,6 +240,7 @@ func liveWriterForMarkerTest(
 	t.Helper()
 	w := startLiveWriterWith(
 		marker,
+		liveOrderStatement,
 		primary,
 		command,
 		time.Millisecond,
@@ -696,6 +697,7 @@ func TestLiveWriterStartupBoundary(t *testing.T) {
 	go func() {
 		writerCh <- startLiveWriterWith(
 			liveWriterTestMarker,
+			liveOrderStatement,
 			primary,
 			command,
 			time.Millisecond,
