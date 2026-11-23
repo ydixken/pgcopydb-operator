@@ -79,10 +79,7 @@ func followEnabled(m *v1beta1.Migration) bool {
 }
 
 func effectiveSlotName(m *v1beta1.Migration) string {
-	if m.Spec.Follow != nil && m.Spec.Follow.SlotName != "" {
-		return m.Spec.Follow.SlotName
-	}
-	return pgcopydb.SlotName(m.Namespace, m.Name)
+	return pgcopydb.EffectiveSlotName(&m.Spec, m.Namespace, m.Name)
 }
 
 func maxCatchupLagBytes(m *v1beta1.Migration) int64 {

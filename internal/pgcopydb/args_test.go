@@ -178,3 +178,51 @@ func assertArgs(t *testing.T, got []string, want string) {
 		t.Fatalf("args mismatch:\n got: %s\nwant: %s", strings.Join(got, " "), want)
 	}
 }
+
+// A single-stream migration keeps the name it had before walWorkers existed.
+func TestEffectiveSlotName_SingleWorkerUnchanged(t *testing.T) {
+	for _, c := range slotNameCases {
+		for _, workers := range []int32{0, 1} {
+			spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{Enabled: true, WalWorkers: workers}}
+			if got := EffectiveSlotName(spec, c.ns, c.name); got != c.want {
+				t.Fatalf("walWorkers %d: got %q, want %q", workers, got, c.want)
+			}
+		}
+	}
+	spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{Enabled: true, SlotName: "explicit_slot", WalWorkers: 4}}
+	if got := EffectiveSlotName(spec, "ns", "m"); got != "explicit_slot" {
+		t.Fatalf("explicit slotName must win: %q", got)
+	}
+}
+
+func TestEffectiveSlotName_WorkersFitSuffix(t *testing.T) {
+	spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{Enabled: true, WalWorkers: 16}}
+	for _, c := range slotNameCases {
+		got := EffectiveSlotName(spec, c.ns, c.name)
+		if len(got) > 51 || got != EffectiveSlotName(spec, c.ns, c.name) {
+			t.Fatalf("worker base %q must be stable and at most 51 bytes", got)
+		}
+		if args := strings.Join(FollowArgs(spec, c.ns, c.name), " "); !strings.Contains(args, "--slot-name "+got+" --origin "+got) {
+			t.Fatalf("FollowArgs disagrees with EffectiveSlotName: %s", args)
+		}
+	}
+	long := slotNameCases[len(slotNameCases)-1]
+	if got := EffectiveSlotName(spec, long.ns, long.name); got != "pgcopydb_verylongnamespaceverylongnamespac_09bed1b0" {
+		t.Fatalf("long worker base = %q", got)
+	}
+}
+
+func TestWorkerSlots(t *testing.T) {
+	for _, c := range []struct {
+		n    int32
+		want []string
+	}{
+		{0, []string{"s"}},
+		{1, []string{"s"}},
+		{3, []string{"s", "s_w1", "s_w2"}},
+	} {
+		if got := WorkerSlots("s", c.n); !slices.Equal(got, c.want) {
+			t.Fatalf("WorkerSlots(s, %d) = %v, want %v", c.n, got, c.want)
+		}
+	}
+}

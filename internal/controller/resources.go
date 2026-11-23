@@ -135,6 +135,9 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	if err := validatePartialTables(m); err != nil {
 		return nil, err
 	}
+	if err := validateWalWorkers(m); err != nil {
+		return nil, err
+	}
 	// Older CRDs may lack CEL rules; Reconcile persists builder errors as terminal InvalidSpec.
 	if m.Spec.Clone.AllDatabases {
 		switch {
@@ -1446,6 +1449,9 @@ echo "preflight: note: wal2json presence on the source cannot be verified from S
 // deterministic check failure fails twice and is terminal.
 func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	if err := validatePartialTables(m); err != nil {
+		return nil, err
+	}
+	if err := validateWalWorkers(m); err != nil {
 		return nil, err
 	}
 	// Superuser credentials ride only in this Job: every other Job stays at

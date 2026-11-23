@@ -201,6 +201,14 @@ func itoa(i int32) string { return fmt.Sprintf("%d", i) }
 // name. Postgres slot names allow [a-z0-9_], max 63 bytes; namespace and name
 // are sanitized and a short hash keeps truncated names collision-free.
 func SlotName(namespace, name string) string {
+	return slotName(namespace, name, 63)
+}
+
+// maxWorkerBaseSlot leaves room for the "_w<k>" suffix pgcopydb appends to
+// worker slots and origins, as admission enforces for an explicit slotName.
+const maxWorkerBaseSlot = 51
+
+func slotName(namespace, name string, limit int) string {
 	raw := namespace + "_" + name
 	sanitized := strings.Map(func(r rune) rune {
 		switch {
@@ -213,11 +221,34 @@ func SlotName(namespace, name string) string {
 		}
 	}, raw)
 	sum := fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(raw)))
-	const max = 63 - 1 - 8 - len("pgcopydb_")
-	if len(sanitized) > max {
-		sanitized = sanitized[:max]
+	maxLen := limit - 1 - 8 - len("pgcopydb_")
+	if len(sanitized) > maxLen {
+		sanitized = sanitized[:maxLen]
 	}
 	return "pgcopydb_" + sanitized + "_" + sum
+}
+
+// EffectiveSlotName is the base slot and origin name a follow migration uses:
+// spec.follow.slotName, or the generated name, shortened when WAL workers add suffixes.
+func EffectiveSlotName(spec *v1beta1.MigrationSpec, namespace, name string) string {
+	f := spec.Follow
+	if f != nil && f.SlotName != "" {
+		return f.SlotName
+	}
+	if f != nil && f.WalWorkers > 1 {
+		return slotName(namespace, name, maxWorkerBaseSlot)
+	}
+	return SlotName(namespace, name)
+}
+
+// WorkerSlots lists the slot of every WAL worker in pgcopydb's naming: worker 0
+// keeps base, worker k uses base_w<k>.
+func WorkerSlots(base string, n int32) []string {
+	slots := []string{base}
+	for k := int32(1); k < n; k++ {
+		slots = append(slots, fmt.Sprintf("%s_w%d", base, k))
+	}
+	return slots
 }
 
 // FollowArgs renders the argv additions for a live migration; empty when
@@ -228,10 +259,7 @@ func FollowArgs(spec *v1beta1.MigrationSpec, namespace, name string) []string {
 	if f == nil || !f.Enabled {
 		return nil
 	}
-	slot := f.SlotName
-	if slot == "" {
-		slot = SlotName(namespace, name)
-	}
+	slot := EffectiveSlotName(spec, namespace, name)
 	args := []string{"--follow", "--slot-name", slot, "--origin", slot}
 	if f.Plugin != "" {
 		args = append(args, "--plugin", f.Plugin)
