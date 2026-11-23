@@ -508,16 +508,16 @@ case "$temp_priv" in
 esac
 `
 
-// deferIndexesImageEnv carries the runner image into the probe's note, so the
+// runnerImageEnv carries the runner image into the runner probes' notes, so the
 // image name never becomes script text.
-const deferIndexesImageEnv = "PREFLIGHT_RUNNER_IMAGE"
+const runnerImageEnv = "PREFLIGHT_RUNNER_IMAGE"
 
 // deferIndexesBlock matches our help line, not the flag name, which another fork ships for
 // other behaviour. 0.18.136.gb42f560 is the first build with it: a pin bump leaves it alone.
 const deferIndexesBlock = `if pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF '` + pgcopydb.DeferIndexesHelp + `'; then
   echo "ok: runner pgcopydb accepts --defer-indexes"
 else
-  note "preflight: spec.clone.deferIndexes needs pgcopydb 0.18.136.gb42f560 or later, and runner image $` + deferIndexesImageEnv + ` does not list its --defer-indexes; recreate the Migration without deferIndexes, or use a runner with pgcopydb 0.18.136.gb42f560 or later"
+  note "preflight: spec.clone.deferIndexes needs pgcopydb 0.18.136.gb42f560 or later, and runner image $` + runnerImageEnv + ` does not list its --defer-indexes; recreate the Migration without deferIndexes, or use a runner with pgcopydb 0.18.136.gb42f560 or later"
 fi
 `
 
@@ -960,6 +960,63 @@ else
   echo "ok: replication slot headroom"
 fi
 `
+
+// walWorkersRunnerBlock fails closed: a pgcopydb without the flag ignores
+// PGCOPYDB_WAL_WORKERS and runs a single stream.
+const walWorkersRunnerBlock = `if pgcopydb clone --help 2>&1 | grep -qF -- '` + pgcopydb.WalWorkersFlag + `'; then
+  echo "ok: runner pgcopydb accepts ` + pgcopydb.WalWorkersFlag + `"
+else
+  note "preflight: spec.follow.walWorkers above 1 needs WAL worker support, and the pgcopydb in runner image $` + runnerImageEnv + ` lacks it (pgcopydb clone --help does not list ` + pgcopydb.WalWorkersFlag + `); recreate the Migration without walWorkers, or use a runner image with WAL worker support"
+fi
+`
+
+// walWorkersHeadroomBlock counts pg_stat_replication rows, which a role without pg_read_all_stats
+// still sees, unlike pg_stat_activity.backend_type. An unreadable count fails the -ge test.
+const walWorkersHeadroomBlock = `wal_free=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('max_replication_slots')::int - count(*) from pg_replication_slots") || wal_free=''
+if [ "$wal_free" -ge @N@ ] 2>/dev/null; then
+  echo "ok: replication slot headroom for @N@ WAL workers"
+else
+  note "preflight: spec.follow.walWorkers @N@ needs @N@ free replication slots on the source, found ${wal_free:-none readable}: raise max_replication_slots or drop unused slots from pg_replication_slots"
+fi
+wal_free=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('max_wal_senders')::int - count(*) from pg_stat_replication") || wal_free=''
+if [ "$wal_free" -ge @N1@ ] 2>/dev/null; then
+  echo "ok: walsender headroom for @N@ WAL workers"
+else
+  note "preflight: spec.follow.walWorkers @N@ needs @N1@ free walsenders on the source, one per worker and one for the snapshot connection held during the base copy, found ${wal_free:-none readable}: raise max_wal_senders"
+fi
+wal_free=$(check "$PGCOPYDB_TARGET_PGURI" "select current_setting(case when current_setting('server_version_num')::int >= 180000 then 'max_active_replication_origins' else 'max_replication_slots' end)::int - count(*) from pg_replication_origin") || wal_free=''
+if [ "$wal_free" -ge @N@ ] 2>/dev/null; then
+  echo "ok: replication origin headroom for @N@ WAL workers"
+else
+  note "preflight: spec.follow.walWorkers @N@ needs @N@ free replication origins on the target, found ${wal_free:-none readable}: raise max_active_replication_origins (PostgreSQL 18 and later) or max_replication_slots (before 18), or drop unused origins from pg_replication_origin"
+fi
+`
+
+// highTrafficTablesBlock reads the newline-joined list from the env, like the
+// replica identity allowlist; to_regclass needs no right on the table.
+const highTrafficTablesBlock = `if ! wal_missing=$(checkv "$PGCOPYDB_SOURCE_PGURI" "select string_agg(t, ', ' order by t) from unnest(string_to_array(:'list', chr(10))) t where to_regclass(t) is null" "$PREFLIGHT_HIGH_TRAFFIC_TABLES"); then
+  note "preflight: cannot check that the spec.follow.highTrafficTables tables exist on the source"
+elif [ -n "$wal_missing" ]; then
+  note "preflight: spec.follow.highTrafficTables names tables the source does not have: $wal_missing"
+else
+  echo "ok: high-traffic tables exist on the source"
+fi
+`
+
+// walWorkersHeadroom needs N free slots and origins, and N+1 walsenders while the
+// base copy holds its snapshot connection open.
+func walWorkersHeadroom(n int32) string {
+	return strings.NewReplacer("@N@", fmt.Sprint(n), "@N1@", fmt.Sprint(n+1)).Replace(walWorkersHeadroomBlock)
+}
+
+// walWorkersBlock takes the place of slotHeadroomBlock above one worker.
+func walWorkersBlock(f *v1beta1.FollowOptions) string {
+	s := walWorkersRunnerBlock + walWorkersHeadroom(f.WalWorkers)
+	if len(f.HighTrafficTables) > 0 {
+		s += highTrafficTablesBlock
+	}
+	return s
+}
 
 // walSenderTimeoutBlock only warns: below 60s a short receive stall (fsync, CPU
 // throttling) ends the stream. It reads over the worker's source URI, so an
@@ -1435,7 +1492,11 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	b.WriteString(rlsAuditBlock)
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
-		b.WriteString(slotHeadroomBlock)
+		if m.Spec.Follow.WalWorkers > 1 {
+			b.WriteString(walWorkersBlock(m.Spec.Follow))
+		} else {
+			b.WriteString(slotHeadroomBlock)
+		}
 		b.WriteString(walSenderTimeoutBlock)
 		b.WriteString(replicationAttrBlock(superSrc, dry))
 		b.WriteString(originGrantsBlock(superTgt, dry))
@@ -1510,9 +1571,9 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
 	}
-	if m.Spec.Clone.DeferIndexes {
+	if m.Spec.Clone.DeferIndexes || (m.Spec.Follow != nil && m.Spec.Follow.WalWorkers > 1) {
 		c := &job.Spec.Template.Spec.Containers[0]
-		c.Env = append(c.Env, corev1.EnvVar{Name: deferIndexesImageEnv, Value: runnerImageFor(m, runnerImage)})
+		c.Env = append(c.Env, corev1.EnvVar{Name: runnerImageEnv, Value: runnerImageFor(m, runnerImage)})
 	}
 	if !m.Spec.Clone.AllDatabases {
 		c := &job.Spec.Template.Spec.Containers[0]
@@ -1534,6 +1595,13 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		c.Env = append(c.Env, corev1.EnvVar{
 			Name:  "PREFLIGHT_ALLOW_MISSING_RI",
 			Value: strings.Join(f.AllowMissingReplicaIdentity, "\n"),
+		})
+	}
+	if f := m.Spec.Follow; f != nil && len(f.HighTrafficTables) > 0 {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  "PREFLIGHT_HIGH_TRAFFIC_TABLES",
+			Value: strings.Join(f.HighTrafficTables, "\n"),
 		})
 	}
 	// The schema filters travel the same way. includeOnlyTables narrows the

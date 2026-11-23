@@ -1336,6 +1336,160 @@ func TestPreflightScript_DeferIndexes(t *testing.T) {
 	}
 }
 
+// superWalWorkersMigration adds the superuser refs, so the follow checks the
+// stub server answers remediate and pass.
+func superWalWorkersMigration() *v1beta1.Migration {
+	m := walWorkersMigration()
+	super := superMigration()
+	m.Spec.Source.SuperuserSecretRef = super.Spec.Source.SuperuserSecretRef
+	m.Spec.Target.SuperuserSecretRef = super.Spec.Target.SuperuserSecretRef
+	return m
+}
+
+// TestPreflightScriptFor_WalWorkers pins that unset and 1 keep today's script, and
+// that above 1 the WAL worker checks replace the one-slot check and nothing else.
+func TestPreflightScriptFor_WalWorkers(t *testing.T) {
+	one := walWorkersMigration()
+	one.Spec.Follow.WalWorkers = 1
+	one.Spec.Follow.HighTrafficTables = nil
+	off := preflightScriptFor(one)
+	if !strings.Contains(off, slotHeadroomBlock) || strings.Contains(off, pgcopydb.WalWorkersFlag) {
+		t.Fatalf("one worker keeps the one-slot check and no runner probe:\n%s", off)
+	}
+	one.Spec.Follow.WalWorkers = 0
+	if preflightScriptFor(one) != off {
+		t.Fatal("walWorkers 1 must leave the script as it is with walWorkers unset")
+	}
+	m := walWorkersMigration()
+	on := preflightScriptFor(m)
+	for _, want := range []string{
+		"needs 4 free replication slots", "needs 5 free walsenders", "needs 4 free replication origins", "to_regclass",
+	} {
+		if !strings.Contains(on, want) {
+			t.Fatalf("missing %q:\n%s", want, on)
+		}
+	}
+	if strings.Contains(on, slotHeadroomBlock) {
+		t.Fatalf("the N-slot check replaces the one-slot check:\n%s", on)
+	}
+	mustPrecede(t, on, walLevelProbe, pgcopydb.WalWorkersFlag)
+	if strings.Replace(on, walWorkersBlock(m.Spec.Follow), slotHeadroomBlock, 1) != off {
+		t.Fatal("the WAL worker checks must be the only difference")
+	}
+	m.Spec.Follow.HighTrafficTables = nil
+	if s := preflightScriptFor(m); strings.Contains(s, "to_regclass") {
+		t.Fatalf("the table check needs highTrafficTables:\n%s", s)
+	}
+}
+
+// TestPreflightScript_WalWorkers runs the WAL worker checks against a stub
+// server: each short resource and each missing table fails by name.
+func TestPreflightScript_WalWorkers(t *testing.T) {
+	run := followPreflightHarness(t)
+	script := preflightScriptFor(superWalWorkersMigration())
+	pass := []string{
+		"PGCOPYDB_STUB_HELP=  --wal-workers <N>             Number of WAL workers",
+		"PREFLIGHT_RUNNER_IMAGE=img:old",
+		"PREFLIGHT_HIGH_TRAFFIC_TABLES=public.events\npublic.orders",
+		"PSQL_SOURCE_TABLES=public.events\npublic.orders",
+		"PSQL_FREE_SLOTS=4", "PSQL_FREE_WALSENDERS=5", "PSQL_FREE_ORIGINS=4",
+	}
+	t.Run("enough headroom and existing tables pass", func(t *testing.T) {
+		out, code, _ := run(t, script, "", pass...)
+		for _, want := range []string{
+			"ok: runner pgcopydb accepts --wal-workers",
+			"ok: replication slot headroom for 4 WAL workers",
+			"ok: walsender headroom for 4 WAL workers",
+			"ok: replication origin headroom for 4 WAL workers",
+			"ok: high-traffic tables exist on the source",
+			preflightAllChecksPassed,
+		} {
+			if code != 0 || !strings.Contains(out, want) {
+				t.Fatalf("code=%d, missing %q, out:\n%s", code, want, out)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, env, want string }{
+		{"three free slots fail", "PSQL_FREE_SLOTS=3",
+			"preflight: spec.follow.walWorkers 4 needs 4 free replication slots on the source, found 3: raise max_replication_slots"},
+		{"four free walsenders fail", "PSQL_FREE_WALSENDERS=4",
+			"needs 5 free walsenders on the source, one per worker and one for the snapshot connection held during the base copy, found 4"},
+		{"three free origins fail", "PSQL_FREE_ORIGINS=3", "needs 4 free replication origins on the target, found 3"},
+		{"an unreadable origin count fails closed", "PSQL_FREE_ORIGINS=", "replication origins on the target, found none readable"},
+		{"a runner without the flag fails", "PGCOPYDB_STUB_HELP=  --follow   Implement logical decoding",
+			"the pgcopydb in runner image img:old lacks it (pgcopydb clone --help does not list --wal-workers)"},
+		{"every missing table is listed", "PSQL_SOURCE_TABLES=public.c",
+			"spec.follow.highTrafficTables names tables the source does not have: public.events, public.orders"},
+		{"an unreadable table check fails closed", "PSQL_SOURCE_TABLES=fail",
+			"cannot check that the spec.follow.highTrafficTables tables exist on the source"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, _ := run(t, script, "", append(slices.Clone(pass), tc.env)...)
+			if code != 1 || !strings.Contains(out, "preflight failed:") || !strings.Contains(out, tc.want) ||
+				strings.Contains(out, preflightAllChecksPassed) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		})
+	}
+}
+
+// TestBuildPreflightJob_WalWorkersEnv pins the env the WAL worker checks read:
+// the image the worker Jobs run and the newline-joined tables, only above one worker.
+func TestBuildPreflightJob_WalWorkersEnv(t *testing.T) {
+	container := func(m *v1beta1.Migration) corev1.Container {
+		t.Helper()
+		job, err := buildPreflightJob(m, testRunnerImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job.Spec.Template.Spec.Containers[0]
+	}
+	m := walWorkersMigration()
+	m.Spec.Follow.WalWorkers = 1
+	m.Spec.Follow.HighTrafficTables = nil
+	c := container(m)
+	for _, name := range []string{"PREFLIGHT_RUNNER_IMAGE", "PREFLIGHT_HIGH_TRAFFIC_TABLES"} {
+		if got := envValue(c.Env, name); got != "" {
+			t.Fatalf("one worker must not set %s, got %q", name, got)
+		}
+	}
+	m = walWorkersMigration()
+	m.Spec.Runner.Image = "registry.example/runner:custom"
+	c = container(m)
+	if got := envValue(c.Env, "PREFLIGHT_RUNNER_IMAGE"); got != c.Image || got != m.Spec.Runner.Image {
+		t.Fatalf("PREFLIGHT_RUNNER_IMAGE = %q, the preflight runs %q, want spec.runner.image", got, c.Image)
+	}
+	if got := envValue(c.Env, "PREFLIGHT_HIGH_TRAFFIC_TABLES"); got != "public.orders\npublic.events" {
+		t.Fatalf("PREFLIGHT_HIGH_TRAFFIC_TABLES = %q", got)
+	}
+}
+
+// TestPreflightScript_WalWorkersLive runs the headroom and table queries through a
+// real psql; CI supplies PGCOPYDB_TEST_PGURI. One server answers for both sides.
+func TestPreflightScript_WalWorkersLive(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("set PGCOPYDB_TEST_PGURI to a reachable Postgres to run the WAL worker checks")
+	}
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Fatalf("PGCOPYDB_TEST_PGURI is set but psql is missing: %v", err)
+	}
+	cmd := exec.Command(shellPath, "-c", preflightHeader+walWorkersHeadroom(2)+highTrafficTablesBlock)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uri, "PGCOPYDB_TARGET_PGURI="+uri,
+		"PREFLIGHT_HIGH_TRAFFIC_TABLES=pg_catalog.pg_class\npublic.pgm_absent_table")
+	out, err := cmd.CombinedOutput()
+	for _, want := range []string{
+		"ok: replication slot headroom for 2 WAL workers",
+		"ok: walsender headroom for 2 WAL workers",
+		"ok: replication origin headroom for 2 WAL workers",
+		"names tables the source does not have: public.pgm_absent_table\n",
+	} {
+		if err != nil || !strings.Contains(string(out), want) {
+			t.Fatalf("err=%v, missing %q, out:\n%s", err, want, out)
+		}
+	}
+}
+
 const (
 	restoreMajorOK     = "ok: runner pg_restore "
 	restoreMajorUnread = "preflight: cannot read the major version of the runner's pg_restore"
@@ -1748,6 +1902,11 @@ case "$q" in
     esac ;;
   'show synchronous_commit') [ "${PSQL_SYNC_COMMIT-}" = fail ] && exit 2; echo "${PSQL_SYNC_COMMIT:-on}" ;;
   *"'TEMP'"*) [ "${PSQL_TEMP-}" = fail ] && exit 2; echo "${PSQL_TEMP:-1}" ;;
+  *max_active_replication_origins*) [ "$uri" = tgt ] || exit 2; echo "${PSQL_FREE_ORIGINS-5}" ;;
+  *pg_stat_replication*) [ "$uri" = src ] || exit 2; echo "${PSQL_FREE_WALSENDERS-5}" ;;
+  *to_regclass*)
+    [ "${PSQL_SOURCE_TABLES-}" = fail ] && exit 2
+    printf '%s\n' "$list" | grep -vxF "${PSQL_SOURCE_TABLES:-public.a}" | awk 'NR>1{printf ", "}{printf "%s",$0}' ;;
   *wal_sender_timeout*)
     # A server applies options=-c from the URI to the session; emulate that.
     case "$uri" in *wal_sender_timeout%3D60s*) echo "60000|1min|${SRC_MAJOR-16}" ;;
@@ -1786,7 +1945,7 @@ case "$q" in
   *session_replication_role*) if [ -f "$STATE/srr" ]; then exit 0; else exit 1; fi ;;
   *rolsuper*) echo "${ROLSUPER:-1}" ;;
   *wal_level*) echo logical ;;
-  *max_replication_slots*) echo 5 ;;
+  *max_replication_slots*) echo "${PSQL_FREE_SLOTS-5}" ;;
   *relreplident*) printf '%s' "${PSQL_RI_OFFENDERS:-}" ;;
   *pg_namespace*) printf '%s' "${PSQL_SCHEMAS:-public}" ;;
   *current_user*) echo "$role" ;;

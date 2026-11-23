@@ -63,6 +63,10 @@ var skipFlag = map[v1beta1.SkipOption]string{
 // and the runner canary match it, not the flag name, which another fork also ships.
 const DeferIndexesHelp = "Build indexes once all table data is copied"
 
+// WalWorkersFlag is the token our fork's clone --help prints; the preflight probe
+// requires it, because an older pgcopydb ignores PGCOPYDB_WAL_WORKERS.
+const WalWorkersFlag = "--wal-workers"
+
 // CloneArgs renders the `pgcopydb clone` argv; each bool adds its flag. restart
 // wipes the work dir, so state a deleted Migration left on the volume cannot
 // poison the run. The URIs are passed via the environment, never in the argv.
