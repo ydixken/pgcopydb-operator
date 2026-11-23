@@ -298,10 +298,10 @@ func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
 			}{
 				"worker":         {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
 				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
-				"retry gate":     {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
+				jobKindGate:      {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
 				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},
 				jobKindVerify:    {func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") }, false},
-				"catalog":        {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
+				jobKindCatalog:   {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
 				"compare data":   {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) }, false},
 				"compare schema": {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) }, false},
 				"reown":          {func() (*batchv1.Job, error) { return buildReownJob(m, "img") }, false},
@@ -564,7 +564,7 @@ func TestJobScripts_ShellValid(t *testing.T) {
 			return buildPreflightJob(syncCommitMigration(false), "img")
 		},
 		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
-		"retry gate":     func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
+		jobKindGate:      func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
 		"retry gate, all databases": func() (*batchv1.Job, error) {
 			all := passwordMigration()
 			all.Spec.Clone.AllDatabases = true
@@ -572,7 +572,7 @@ func TestJobScripts_ShellValid(t *testing.T) {
 		},
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
-		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
+		jobKindCatalog:    func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
 		jobKindRehearsal:  func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
 		"rehearsal, filters": func() (*batchv1.Job, error) {
 			filtered := passwordMigration()

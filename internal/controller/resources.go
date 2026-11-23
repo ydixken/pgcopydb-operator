@@ -181,6 +181,17 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 			Name: "PGCOPYDB_APPLY_GROUP_TXNS", Value: fmt.Sprint(m.Spec.Follow.ApplyGroupTransactions),
 		})
 	}
+	// validateWalWorkers above guarantees follow is enabled when walWorkers is above 1,
+	// and that highTrafficTables is set only then.
+	if f := m.Spec.Follow; f != nil && f.WalWorkers > 1 {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_WAL_WORKERS", Value: fmt.Sprint(f.WalWorkers)})
+		if len(f.HighTrafficTables) > 0 {
+			c.Env = append(c.Env, corev1.EnvVar{
+				Name: "PGCOPYDB_WAL_HIGH_TRAFFIC_TABLES", Value: strings.Join(f.HighTrafficTables, ","),
+			})
+		}
+	}
 	return job, nil
 }
 

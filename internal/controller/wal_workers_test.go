@@ -124,3 +124,54 @@ func TestReconcile_WalWorkersInvalidSpec(t *testing.T) {
 		t.Fatalf("missing InvalidSpec event: %v", emitted)
 	}
 }
+
+// Only the worker streams changes, so no other Job may carry the knobs; N = 1 sets neither.
+func TestBuildJob_WalWorkersEnv(t *testing.T) {
+	const workers, tables = "PGCOPYDB_WAL_WORKERS", "PGCOPYDB_WAL_HIGH_TRAFFIC_TABLES"
+	m := walWorkersMigration()
+	m.Spec.Clone.NoOwner = true
+	m.Spec.Clone.OwnerAfterRestore = reownTestOwner
+	job, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := job.Spec.Template.Spec.Containers[0].Env
+	if got := envValue(env, workers); got != "4" {
+		t.Errorf("%s = %q, want 4", workers, got)
+	}
+	if got := envValue(env, tables); got != "public.orders,public.events" {
+		t.Errorf("%s = %q, want public.orders,public.events", tables, got)
+	}
+
+	for name, build := range map[string]func() (*batchv1.Job, error){
+		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		jobKindGate:      func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
+		jobKindCleanup:   func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+		jobKindCatalog:   func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") },
+		"compare data":   func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) },
+		"compare schema": func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+		"reown":          func() (*batchv1.Job, error) { return buildReownJob(m, "img") },
+		jobKindRehearsal: func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
+	} {
+		job, err := build()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, c := range job.Spec.Template.Spec.Containers {
+			if envValue(c.Env, workers) != "" || envValue(c.Env, tables) != "" {
+				t.Errorf("%s Job carries the walWorkers env", name)
+			}
+		}
+	}
+
+	m.Spec.Follow.WalWorkers = 1
+	m.Spec.Follow.HighTrafficTables = nil
+	if job, err = buildJob(m, "img", 1); err != nil {
+		t.Fatal(err)
+	}
+	env = job.Spec.Template.Spec.Containers[0].Env
+	if envValue(env, workers) != "" || envValue(env, tables) != "" {
+		t.Errorf("walWorkers 1 must set neither variable")
+	}
+}
