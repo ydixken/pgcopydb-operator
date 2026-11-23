@@ -687,6 +687,9 @@ func TestPublicationDropGuard(t *testing.T) {
 		return m
 	}
 	generated := pgcopydb.SlotName("ns", "m")
+	workers := follow("", "", "", true)
+	workers.Spec.Follow.WalWorkers = 3
+	workerBase := pgcopydb.EffectiveSlotName(&workers.Spec, "ns", "m")
 
 	cases := []struct {
 		name    string
@@ -703,22 +706,40 @@ func TestPublicationDropGuard(t *testing.T) {
 		{"test_decoding has no publication guard", follow("", "", "test_decoding", true), 2, ""},
 		{"disabled follow has no guard", follow("", "", "", false), 2, ""},
 		{"non-follow migration has no guard", passwordMigration(), 2, ""},
+		{"WAL workers guard the per-table publications", workers, 2, workerBase},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			guard := publicationDropGuard(tc.m, tc.attempt)
+			s := "'" + tc.slot + "'"
+			wants := []string{"PGCOPYDB_SOURCE_PGURI", "ON_ERROR_STOP=1",
+				"pg_catalog.pg_replication_slots WHERE slot_name = " + s, "RAISE EXCEPTION"}
+			if tc.m == workers {
+				// No publication named after the slot exists: match S_t<oid> and S_w<k> exactly.
+				wants = append(wants,
+					"pg_catalog.pg_publication WHERE left(pubname, length("+s+")) = "+s+
+						" AND substr(pubname, length("+s+") + 1) ~ '^_t[0-9]+$'",
+					"pg_catalog.pg_replication_slots WHERE left(slot_name, length("+s+")) = "+s+
+						" AND substr(slot_name, length("+s+") + 1) ~ '^_w[0-9]+$'",
+					"EXECUTE format('DROP PUBLICATION %I', p)")
+				if strings.Contains(guard, "pubname = "+s) || strings.Contains(guard, "LIKE") {
+					t.Fatalf("WAL worker guard looks for the single-worker publication or uses LIKE:\n%s", guard)
+				}
+			} else {
+				wants = append(wants, "pg_catalog.pg_publication WHERE pubname = "+s, `DROP PUBLICATION IF EXISTS "`+tc.slot+`"`)
+			}
 			if tc.slot == "" {
 				if guard != "" {
 					t.Fatalf("unexpected guard: %q", guard)
 				}
 			} else {
-				for _, want := range []string{"PGCOPYDB_SOURCE_PGURI", "ON_ERROR_STOP=1",
-					"pg_catalog.pg_replication_slots WHERE slot_name = '" + tc.slot + "'",
-					"pg_catalog.pg_publication WHERE pubname = '" + tc.slot + "'",
-					`DROP PUBLICATION IF EXISTS "` + tc.slot + `"`, "RAISE EXCEPTION"} {
+				for _, want := range wants {
 					if !strings.Contains(guard, want) {
 						t.Fatalf("guard missing %q:\n%s", want, guard)
 					}
+				}
+				if simulateKubeletDollarExpansion(guard) != guard {
+					t.Fatalf("guard does not survive kubelet's $$ expansion:\n%s", guard)
 				}
 			}
 			// The guard must reach the Job's prelude, after the passfile

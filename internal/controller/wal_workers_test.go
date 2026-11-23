@@ -18,10 +18,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -173,5 +176,70 @@ func TestBuildJob_WalWorkersEnv(t *testing.T) {
 	env = job.Spec.Template.Spec.Containers[0].Env
 	if envValue(env, workers) != "" || envValue(env, tables) != "" {
 		t.Errorf("walWorkers 1 must set neither variable")
+	}
+}
+
+// The sweep runs after stream cleanup in the cleanup Job; one stream keeps the plain argv.
+func TestBuildCleanupJob_WalWorkersSweep(t *testing.T) {
+	m := walWorkersMigration()
+	m.Spec.Follow.SlotName = "sweep_slot"
+	job, err := buildCleanupJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := job.Spec.Template.Spec.Containers[0].Args[1]
+	mustPrecede(t, script, "pgcopydb stream cleanup --dir /work/pgcopydb --slot-name sweep_slot --origin sweep_slot\n", walWorkersSweep(m))
+	for _, want := range []string{`psql "$PGCOPYDB_SOURCE_PGURI"`, `psql "$PGCOPYDB_TARGET_PGURI"`,
+		"pg_drop_replication_slot(n)", "format('DROP PUBLICATION %I', n)", "pg_replication_origin_drop(o)"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("cleanup script lacks %q:\n%s", want, script)
+		}
+	}
+	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 2 || simulateKubeletDollarExpansion(script) != script {
+		t.Errorf("cleanup Job must keep two retries and survive kubelet's $$ expansion")
+	}
+
+	m.Spec.Follow.WalWorkers, m.Spec.Follow.HighTrafficTables = 1, nil
+	if walWorkersSweep(m) != "" {
+		t.Fatal("one WAL stream needs no sweep")
+	}
+	if job, err = buildCleanupJob(m, "img"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " "); got != "stream cleanup --dir /work/pgcopydb --slot-name sweep_slot --origin sweep_slot" {
+		t.Fatalf("single-stream cleanup argv changed: %q", got)
+	}
+}
+
+// Both CleanupFailed paths name every slot that can still hold WAL on the source.
+func TestEnsureCleanup_NamesWorkerSlots(t *testing.T) {
+	terminating := apierrors.NewForbidden(batchv1.Resource("jobs"), "m-cleanup", errors.New("namespace is terminating"))
+	terminating.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: corev1.NamespaceTerminatingCause}}
+	refuseCreate := interceptor.Funcs{Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+		return terminating
+	}}
+	for workers, want := range map[int32]string{
+		1: `replication slot "cleanup_slot" `,
+		3: `replication slot "cleanup_slot" (with WAL worker slots cleanup_slot_w1, cleanup_slot_w2) `,
+	} {
+		m := passwordMigration()
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "cleanup_slot", WalWorkers: workers}
+		failed := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: cleanupJobName(m), Namespace: m.Namespace},
+			Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+			}},
+		}
+		for path, r := range map[string]*MigrationReconciler{
+			"retries exhausted":     failingReconciler(t, interceptor.Funcs{}, failed),
+			"namespace terminating": failingReconciler(t, refuseCreate),
+		} {
+			done, err := r.ensureCleanup(context.Background(), m)
+			emitted := drainEvents(r.Recorder.(*events.FakeRecorder))
+			if !done || err != nil || len(emitted) != 1 || !strings.Contains(emitted[0], "CleanupFailed") ||
+				!strings.Contains(emitted[0], want) {
+				t.Errorf("%d workers, %s: done=%t err=%v events=%q, want %q", workers, path, done, err, emitted, want)
+			}
+		}
 	}
 }

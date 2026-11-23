@@ -163,7 +163,7 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 		if hasPartialTables(m) {
 			guard = managedPublicationCleanup(m, false)
 		}
-		setup = guard + "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + setup
+		setup = guard + "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + walWorkersSweep(m) + setup
 	}
 	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0, true)
 	if err != nil {
@@ -211,6 +211,9 @@ func publicationDropGuard(m *v1beta1.Migration, attempt int32) string {
 	}
 	// Generated and CRD-validated slot names contain only [a-z0-9_].
 	slot := effectiveSlotName(m)
+	if m.Spec.Follow.WalWorkers > 1 {
+		return walWorkersPublicationGuard(slot)
+	}
 	return `psql "$PGCOPYDB_SOURCE_PGURI" -Xq -v ON_ERROR_STOP=1 <<'PUBLICATION_RETRY'
 DO ` + publicationRetryDollarTag + `
 BEGIN
@@ -226,13 +229,13 @@ END;
 PUBLICATION_RETRY`
 }
 
-// buildCleanupJob drops the slot, the auto-created publication and the target
-// origin after a live migration, abort or deletion. It reuses the worker pod
+// buildCleanupJob drops the slots, the auto-created publications and the target
+// origins after a live migration, abort or deletion. It reuses the worker pod
 // shape for the work-dir catalogs. Job retries are safe: it is idempotent.
 func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
-	if hasPartialTables(m) {
+	if sweep := walWorkersSweep(m); hasPartialTables(m) || sweep != "" {
 		script := "set -eu\n" + managedPublicationCleanup(m, false) +
-			"pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + managedPublicationCleanup(m, true)
+			"pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + managedPublicationCleanup(m, true) + sweep
 		job, err := scriptJob(m, runnerImage, cleanupJobName(m), script, false)
 		if err != nil {
 			return nil, err

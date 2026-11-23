@@ -194,7 +194,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently. The controller tries again on the next pass. |
 | `RehearsalPodRemains` | Warning | The drain verify waits for the pod of a canceled verification rehearsal (action `Cutover`): once when the wait starts, with the condition's message. |
 | `CleanupStarted` | Normal | The controller created the cleanup Job (slot, publication, origin). |
-| `CleanupFailed` | Warning | Cleanup exhausted its retries. The named slot may still hold WAL on the source, and it needs manual removal. |
+| `CleanupFailed` | Warning | Cleanup exhausted its retries. The named slot may still hold WAL on the source, and it needs manual removal. With `spec.follow.walWorkers` above 1, the message also names each WAL worker slot. |
 | `OwnershipStarted` | Normal | The controller created the `<name>-reown` handover Job. |
 | `OwnershipApplied` | Normal | The handover finished. The restored objects belong to `clone.ownerAfterRestore`. |
 | `Suspended` | Normal | `spec.suspend` deleted the worker, and a running handover Job with it. The work volume stays. |

@@ -577,12 +577,24 @@ The operator drops only an orphan that has no source slot, and pgcopydb then ret
 An explicit `spec.follow.publication` value bypasses this guard, and so does any plugin other than `pgoutput`, such as `wal2json` and `test_decoding`.
 A retry that [starts over](#phase-failed-with-reason-snapshotlost) runs `pgcopydb stream cleanup` before the guard, so it finds neither the slot nor the automatic publication.
 
+With `spec.follow.walWorkers` above 1, pgcopydb creates one publication for each table, with the name `<slot>_t<table oid>`.
+No publication has the name of the slot.
+A retry keeps these publications when the source slot exists.
+When the source slot does not exist and no WAL worker slot (`<slot>_w<k>`) exists, the retry drops these publications as orphans.
+A retry that starts over also drops the WAL worker slots, the per-table publications, and the WAL worker origins on the target before the guard.
+The operator finds these objects from the slot name, so it also drops them when the work volume is lost.
+
 The bundled runner also fixes an interrupted setup when the retry creates a fresh slot and the work catalog has no sentinel row.
 Not every runner version has this bootstrap recovery.
 See [client tool versions](reference/prerequisites.md#client-tool-versions).
 If a retained slot has missing or unreadable sentinel state, the setup fails closed and does not rebuild established progress.
 
 `publication retry refused: source slot "..." exists but auto publication "..." is missing` means that the source state is inconsistent.
+With WAL workers, two other messages also show an inconsistent source state:
+
+- `publication retry refused: source slot "..." exists but no WAL worker publication "..._t<table oid>" exists`
+- `publication retry refused: WAL worker slots "..._w<k>" exist but source slot "..." is missing`
+
 The attempt fails before pgcopydb starts.
 A catalog-query error or a publication-drop error also stops it.
 Read the worker log.

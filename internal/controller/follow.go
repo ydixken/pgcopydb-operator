@@ -342,7 +342,7 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migr
 			// A source inside this namespace is deleted with it, nothing to
 			// clean; a source elsewhere keeps its slot, so name it.
 			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup",
-				"namespace %s is terminating, so the cleanup Job could not be created; a source inside this namespace is deleted with it, but a source outside it may retain replication slot %q and needs manual removal", m.Namespace, effectiveSlotName(m))
+				"namespace %s is terminating, so the cleanup Job could not be created; a source inside this namespace is deleted with it, but a source outside it may retain replication slot %s and needs manual removal", m.Namespace, leftoverSlots(m))
 			return true, nil
 		}
 		return false, err
@@ -360,7 +360,7 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migr
 	}
 	if !ok {
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup",
-			"stream cleanup failed after retries; the replication slot %q may be leaking WAL on the source and needs manual removal", effectiveSlotName(m))
+			"stream cleanup failed after retries; the replication slot %s may be leaking WAL on the source and needs manual removal", leftoverSlots(m))
 	}
 	return true, nil
 }

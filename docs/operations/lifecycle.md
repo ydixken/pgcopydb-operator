@@ -260,17 +260,19 @@ Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
 - **Live Migration that ever started**: a finalizer routes deletion through cleanup, because a leaked replication slot retains WAL on the source forever.
   The operator first stops the worker and a running [verification rehearsal](verification.md#rehearsal).
   It then runs the cleanup Job, which drops the slot, the auto-created publication, and the target origin.
+  With `spec.follow.walWorkers` above 1, the Job also drops each WAL worker slot, each per-table publication, and each WAL worker origin.
+  It finds them from the slot name, so it also drops them when the work volume is lost.
   Last, it releases the CR to garbage collection.
   Deletion therefore takes a few reconcile cycles, not milliseconds.
-- **Cleanup that cannot finish**: if cleanup uses all its retries, the operator emits a `CleanupFailed` warning that names the slot.
+- **Cleanup that cannot finish**: if cleanup uses all its retries, the operator emits a `CleanupFailed` warning that names the slot and each WAL worker slot.
   It then releases the Migration anyway.
   This occurs, for instance, when the source is gone.
   An unreachable source should not block deletion forever.
   If the source still exists, check `pg_replication_slots` on the source.
-  Then run `SELECT pg_drop_replication_slot('<slot>')` manually.
+  Then run `SELECT pg_drop_replication_slot('<slot>')` manually for each named slot.
 - **Deleting the whole namespace**: we support it.
   A terminating namespace refuses new Jobs, so cleanup cannot run there.
-  The operator emits the same `CleanupFailed` warning, which names the slot, and releases the Migration.
+  The operator emits the same `CleanupFailed` warning, which names the slots, and releases the Migration.
   So namespace deletion never deadlocks against the finalizer.
   The namespace deletion also deletes a source inside the namespace, so nothing leaks.
   A source outside the namespace (another namespace, or outside the cluster) keeps its slot and retains WAL.
