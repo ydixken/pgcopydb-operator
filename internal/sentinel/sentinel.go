@@ -23,7 +23,9 @@ package sentinel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -58,9 +60,12 @@ func (c *Client) inPodSh(ctx context.Context, namespace, pod, script string) ([]
 	return c.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + script})
 }
 
-// State is one replication sample, read from the source alone. Endpos is
-// never read from the worker: the operator sets it and keeps it in
-// status.replication.
+// ErrSlotMissing reports WAL worker slots absent from a sample that found the others.
+var ErrSlotMissing = errors.New("WAL worker replication slots missing on the source")
+
+// State is one replication sample, read from the source alone; over several
+// worker slots WriteLSN and ReplayLSN are the minimum, unknown if any slot's is.
+// Endpos is never read from the worker: the operator keeps it in status.replication.
 type State struct {
 	WriteLSN string
 	// ReplayLSN is the slot's reported replay cursor, with confirmed-flush
@@ -69,6 +74,14 @@ type State struct {
 	Endpos    string
 	// SourceHead is source-wide durable WAL, not the publication cursor.
 	SourceHead string
+	// Workers holds one entry per slot, only when more than one was read.
+	Workers []WorkerState
+}
+
+// WorkerState is one WAL worker slot's replay position in a sample.
+type WorkerState struct {
+	SlotName  string
+	ReplayLSN string
 }
 
 // Lag estimates source-wide durable WAL distance from the slot progress sample.
@@ -83,49 +96,110 @@ func (s State) Lag() int64 {
 	return int64(head - replay)
 }
 
-// readScript samples source head and the exact migration slot in one exec.
+// readScript samples source head and the exact migration slots in one exec.
 // It prefers reported replay; confirmed-flush fallback remains slot-scoped but
 // may measure consumption, so server-wide WAL distance is only an estimate.
 //
 // Best effort, and the script always exits 0: psql reports a SQL error in its
 // exit status, and a failure here must never cost the caller its sample.
-func readScript(slot string) string {
+func readScript(slots []string) string {
+	// One slot keeps the untagged single-row query. Slot names are [a-z0-9_]
+	// (CRD pattern or generated), so quoting them is safe.
+	tag, where := ``, `where s.slot_name = '`+slots[0]+`'`
+	if len(slots) > 1 {
+		tag, where = `'slot=' || s.slot_name, `, `where s.slot_name in ('`+strings.Join(slots, `', '`)+`')`
+	}
 	return `psql "$PGCOPYDB_SOURCE_PGURI" -XAtq -F ' ' ` +
 		`-c "select 'source_head=' || pg_current_wal_flush_lsn()" ` +
-		`-c "select 'write_lsn=' || coalesce(coalesce(r.write_lsn, s.confirmed_flush_lsn)::text, ''), ` +
+		`-c "select ` + tag + `'write_lsn=' || coalesce(coalesce(r.write_lsn, s.confirmed_flush_lsn)::text, ''), ` +
 		`'replay_lsn=' || coalesce(coalesce(r.replay_lsn, s.confirmed_flush_lsn)::text, '') ` +
 		`from pg_replication_slots s ` +
-		`left join pg_stat_replication r on r.pid = s.active_pid where s.slot_name = '` + slot + `'"; exit 0`
+		`left join pg_stat_replication r on r.pid = s.active_pid ` + where + `"; exit 0`
 }
 
-// parseSample reads the labelled values out of the script's output. Anything
-// that is not an LSN is ignored, so a missing row, a blank column, and a psql
+// labels reads the key=value fields of s. Anything that is not an LSN is
+// ignored, except the slot tag, so a missing row, a blank column, and a psql
 // error line all land in the same place: absent.
-func parseSample(out []byte) *State {
+func labels(s string) map[string]string {
 	vals := map[string]string{}
-	for field := range strings.FieldsSeq(string(out)) {
+	for field := range strings.FieldsSeq(s) {
 		k, v, ok := strings.Cut(field, "=")
 		if !ok {
 			continue
 		}
-		if _, err := ParseLSN(v); err != nil {
+		if _, err := ParseLSN(v); err != nil && k != "slot" {
 			continue
 		}
 		vals[k] = v
 	}
-	if vals["write_lsn"] == "" {
-		// No slot row, so nothing was learned this pass. Reporting the WAL
-		// head alone would blank the LSNs already in status.
-		return nil
-	}
-	return &State{WriteLSN: vals["write_lsn"], ReplayLSN: vals["replay_lsn"], SourceHead: vals["source_head"]}
+	return vals
 }
 
-// Read samples the stream of one running follow migration. slotName names
-// both the source slot and the target origin, which the operator keeps
-// identical (see effectiveSlotName). A nil State with a nil error means "no
-// sample, keep the previous one" (same contract as progress polling).
-func (c *Client) Read(ctx context.Context, namespace, jobName, slotName string) (*State, error) {
+// parseSample reads the script's output for the requested slots. No slot row
+// is no sample; above one slot, rows for only some slots is ErrSlotMissing.
+func parseSample(out []byte, slots []string) (*State, error) {
+	if len(slots) == 1 {
+		vals := labels(string(out))
+		if vals["write_lsn"] == "" {
+			// No slot row, so nothing was learned this pass. Reporting the WAL
+			// head alone would blank the LSNs already in status.
+			return nil, nil
+		}
+		return &State{WriteLSN: vals["write_lsn"], ReplayLSN: vals["replay_lsn"], SourceHead: vals["source_head"]}, nil
+	}
+	st := &State{}
+	rows := map[string]map[string]string{}
+	for line := range strings.Lines(string(out)) {
+		vals := labels(line)
+		if head, ok := vals["source_head"]; ok {
+			st.SourceHead = head
+		}
+		if slot := vals["slot"]; slices.Contains(slots, slot) {
+			rows[slot] = vals
+		}
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	var missing, writes, replays []string
+	for _, slot := range slots {
+		vals, ok := rows[slot]
+		if !ok {
+			missing = append(missing, slot)
+			continue
+		}
+		writes = append(writes, vals["write_lsn"])
+		replays = append(replays, vals["replay_lsn"])
+		st.Workers = append(st.Workers, WorkerState{SlotName: slot, ReplayLSN: vals["replay_lsn"]})
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSlotMissing, strings.Join(missing, ", "))
+	}
+	st.WriteLSN, st.ReplayLSN = minLSN(writes), minLSN(replays)
+	return st, nil
+}
+
+// minLSN is the lowest of lsns, or "" when any is unknown: the minimum of the
+// others would overstate how far the slowest worker got.
+func minLSN(lsns []string) string {
+	least, low := "", uint64(0)
+	for i, lsn := range lsns {
+		v, err := ParseLSN(lsn)
+		if err != nil {
+			return ""
+		}
+		if i == 0 || v < low {
+			least, low = lsn, v
+		}
+	}
+	return least
+}
+
+// Read samples the stream of one running follow migration. slots names the
+// source slot of every WAL worker, which also names its target origin (see
+// effectiveSlotName). A nil State with a nil error means "no sample, keep the
+// previous one" (same contract as progress polling).
+func (c *Client) Read(ctx context.Context, namespace, jobName string, slots []string) (*State, error) {
 	pod, err := c.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil {
 		return nil, err
@@ -133,13 +207,13 @@ func (c *Client) Read(ctx context.Context, namespace, jobName, slotName string) 
 	if pod == "" {
 		return nil, nil
 	}
-	out, err := c.inPodSh(ctx, namespace, pod, readScript(slotName))
+	out, err := c.inPodSh(ctx, namespace, pod, readScript(slots))
 	if err != nil {
 		// The pod can refuse an exec while it starts or terminates; the next
 		// pass retries.
 		return nil, nil
 	}
-	return parseSample(out), nil
+	return parseSample(out, slots)
 }
 
 // SetEndposCurrent freezes the stream at the source's current flush LSN; the
@@ -194,6 +268,16 @@ func (s *State) ToStatus(slotName string) *v1beta1.ReplicationStatus {
 	}
 	if lag := s.Lag(); lag >= 0 {
 		rs.LagBytes = &lag
+	}
+	for _, w := range s.Workers {
+		ws := v1beta1.ReplicationWorkerStatus{SlotName: w.SlotName}
+		if lsnSet(w.ReplayLSN) {
+			ws.ReplayLSN = w.ReplayLSN
+		}
+		if lag := (State{SourceHead: s.SourceHead, ReplayLSN: w.ReplayLSN}).Lag(); lag >= 0 {
+			ws.LagBytes = &lag
+		}
+		rs.Workers = append(rs.Workers, ws)
 	}
 	return rs
 }
