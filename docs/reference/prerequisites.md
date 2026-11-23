@@ -14,22 +14,22 @@ Use the [Planning checklist](../planning.md) to record the scope, operational, c
 Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuser on both sides.
 See [All databases](#all-databases).
 
-| Requirement                                             | Where  | Needed for       |
-|---------------------------------------------------------|--------|------------------|
-| No PgBouncer between the runner and either endpoint     | both   | every migration  |
-| SELECT on copied tables and sequences, USAGE on schemas | source | every migration  |
-| CREATE on the database, ownership alignment             | target | every migration  |
-| `wal_level = logical`                                   | source | follow           |
-| Free replication slot and WAL sender                    | source | follow           |
-| N slots, N + 1 WAL senders, N origins ([WAL workers](#wal-workers)) | both | `walWorkers` N above 1 |
-| `REPLICATION` role attribute                            | source | follow           |
-| CREATE on the database plus table ownership (publication) | source | follow         |
-| EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
-| Primary key or replica identity on replicated tables    | source | follow           |
-| No row-level security that filters the migration role  | source | single-database migrations |
-| No unlogged tables in scope                             | source | follow           |
-| `TEMPORARY` on the database (`PUBLIC` holds it by default) | target | retries        |
-| A migration role no other Migration shares on the target database | target | every migration |
+| Requirement                                                         | Where  | Needed for                 |
+|---------------------------------------------------------------------|--------|----------------------------|
+| No PgBouncer between the runner and either endpoint                 | both   | every migration            |
+| SELECT on copied tables and sequences, USAGE on schemas             | source | every migration            |
+| CREATE on the database, ownership alignment                         | target | every migration            |
+| `wal_level = logical`                                               | source | follow                     |
+| Free replication slot and WAL sender                                | source | follow                     |
+| N slots, N + 1 WAL senders, N origins ([WAL workers](#wal-workers)) | both   | `walWorkers` N above 1     |
+| `REPLICATION` role attribute                                        | source | follow                     |
+| CREATE on the database plus table ownership (publication)           | source | follow                     |
+| EXECUTE on `pg_replication_origin_*` functions                      | target | follow                     |
+| Primary key or replica identity on replicated tables                | source | follow                     |
+| No row-level security that filters the migration role               | source | single-database migrations |
+| No unlogged tables in scope                                         | source | follow                     |
+| `TEMPORARY` on the database (`PUBLIC` holds it by default)          | target | retries                    |
+| A migration role no other Migration shares on the target database   | target | every migration            |
 
 ## Kubernetes
 

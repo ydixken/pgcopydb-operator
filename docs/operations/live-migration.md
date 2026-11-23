@@ -243,7 +243,8 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 
     With `spec.follow.walWorkers` above 1, each WAL worker has its own replication origin, and the fast path needs all of them exactly on the cutover LSN.
     Each worker moves its origin to the cutover LSN when it finishes, also when its tables got no changes.
-    Thus a clean cutover usually passes on the fast path and does not run `compare data`.
+    Thus after a clean finish, every origin is on the cutover LSN, and the Job passes on the fast path without `compare data`.
+    A worker that stops on a signal or an error does not move its origin, and neither does a resume that finds nothing to do.
     When one origin is not on the cutover LSN, the content decides.
 
     The Job runs `pgcopydb compare data` and checks the report that `--json` prints.
@@ -253,6 +254,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
     The result is a refusal, not a pass, when the compare could not run or when the Job cannot read the report.
 
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin.
+    With `spec.follow.walWorkers` above 1, it also drops each WAL worker slot and each per-table publication on the source, and each WAL worker origin on the target.
     After any requested [post-transfer verification](verification.md), `Complete` becomes True and the phase is `Completed`.
 
 7. Connect the application to the target.

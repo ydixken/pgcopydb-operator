@@ -397,14 +397,17 @@ The attempt starts when the origin is free.
 
 ### `CaughtUp` stays False
 
-`CaughtUp` stays False in three cases:
+`CaughtUp` stays False in four cases:
 
 - The lag is above `follow.maxCatchupLag`.
 - Only one below-threshold sample has arrived.
 - No replication sample exists yet.
+- With `spec.follow.walWorkers` above 1, the source has the slots of some WAL workers, but not of all of them.
 
 With one below-threshold sample, the reason is `ConfirmingCatchUp`.
 That reason clears on the next sample.
+With missing WAL worker slots, the reason is `WorkerSlotMissing`, and the message names the missing slots.
+When the source has none of the WAL worker slots, the operator gets no sample, and `CaughtUp` keeps its value.
 
 Read `status.replication.lagBytes`.
 If heavy write traffic keeps the lag high, throttle the traffic or raise the threshold.
@@ -581,7 +584,9 @@ With `spec.follow.walWorkers` above 1, pgcopydb creates one publication for each
 No publication has the name of the slot.
 A retry keeps these publications when the source slot exists.
 When the source slot does not exist and no WAL worker slot (`<slot>_w<k>`) exists, the retry drops these publications as orphans.
-A retry that starts over also drops the WAL worker slots, the per-table publications, and the WAL worker origins on the target before the guard.
+A retry that starts over also drops the WAL worker objects before the guard.
+On the source, it drops the WAL worker slots and the per-table publications.
+On the target, it drops the WAL worker origins.
 The operator finds these objects from the slot name, so it also drops them when the work volume is lost.
 
 The bundled runner also fixes an interrupted setup when the retry creates a fresh slot and the work catalog has no sentinel row.
@@ -735,7 +740,9 @@ kubectl delete pod <pod> --grace-period=0 --force
 ### The verify pod runs for a long time
 
 The Migration stays in `CuttingOver`, and the `<name>-verify` pod runs for a long time.
-With one WAL stream, the target's origin lands exactly on the cutover LSN only when nothing wrote on the source after the last applied commit.
+With one WAL stream, an exact landing on the cutover LSN needs a quiet source.
+The target's origin lands there only when nothing wrote on the source between the last applied commit and the approval.
+WAL that the source writes after the approval is beyond endpos.
 Nearly every such cutover therefore proves the drain by content instead.
 With `spec.follow.walWorkers` above 1, each worker moves its origin to the cutover LSN when it finishes.
 In that case, a long verify means that at least one worker origin is not on the cutover LSN.
@@ -753,7 +760,9 @@ A verify Job that fails runs once more before the Migration fails, so a refusal 
 ### Phase `Failed` with reason `DrainIncomplete`
 
 Phase `Failed` with reason `DrainIncomplete` means that the verify Job found changes below the cutover LSN that the target does not have.
-`pgcopydb compare data` reported differing tables.
+With `spec.follow.walWorkers` above 1, a WAL worker that has no replication origin on the target also causes this failure.
+In that case, the Job stops before the compare, and its log shows the `psql` error that names the origin.
+In the other cases, `pgcopydb compare data` reported differing tables.
 The typical cause is a crash inside the drain window.
 After such a crash, pgcopydb `--resume` exits 0 without replaying.
 With a runner older than `0.18.98.g944abcc`, apply that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
@@ -763,8 +772,6 @@ No data is lost at the source: the slot stays and retains WAL.
 The verify Job logs name the differing tables.
 They also print `endpos`, `replay_lsn`, and `origin_progress`.
 A `replay_lsn` below `endpos` means that the stream was never consumed to the cutover LSN.
-When a WAL worker has no replication origin on the target, the Job stops before the compare.
-Its log shows the `psql` error that names the origin.
 The simplest recovery is:
 
 1. Keep running on the source.

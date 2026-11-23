@@ -270,6 +270,25 @@ Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
   An unreachable source should not block deletion forever.
   If the source still exists, check `pg_replication_slots` on the source.
   Then run `SELECT pg_drop_replication_slot('<slot>')` manually for each named slot.
+  With `spec.follow.walWorkers` above 1, also drop the per-table publications on the source and the WAL worker origins on the target.
+  The cleanup sweep finds these objects with the name tests below, where `<slot>` is the slot name.
+  Do not use `LIKE`: its `_` wildcard can match the objects of a different Migration.
+  On the source, list the per-table publications, then run `DROP PUBLICATION` for each name:
+
+  ```sql
+  SELECT pubname FROM pg_catalog.pg_publication
+  WHERE left(pubname, length('<slot>')) = '<slot>'
+    AND substr(pubname, length('<slot>') + 1) ~ '^_t[0-9]+$';
+  ```
+
+  On the target, drop the WAL worker origins:
+
+  ```sql
+  SELECT pg_catalog.pg_replication_origin_drop(roname) FROM pg_catalog.pg_replication_origin
+  WHERE left(roname, length('<slot>')) = '<slot>'
+    AND substr(roname, length('<slot>') + 1) ~ '^_w[0-9]+$';
+  ```
+
 - **Deleting the whole namespace**: we support it.
   A terminating namespace refuses new Jobs, so cleanup cannot run there.
   The operator emits the same `CleanupFailed` warning, which names the slots, and releases the Migration.
