@@ -42,6 +42,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
@@ -434,6 +435,71 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	// what it was.
 	if strings.Contains(c.Args[1], "clone_progress=$(") {
 		t.Fatalf("verify script must not ask for counters without a gate:\n%s", c.Args[1])
+	}
+}
+
+// TestBuildVerifyJob_WorkerOriginsPredicate: with WAL workers the script reads every
+// worker origin, passes fast only with none behind, and refuses only after compare data.
+func TestBuildVerifyJob_WorkerOriginsPredicate(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: 3}
+	job, err := buildVerifyJob(m, "img", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := job.Spec.Template.Spec.Containers[0].Args[1]
+	origins := strings.Join(pgcopydb.WorkerSlots(effectiveSlotName(m), 3), " ")
+	for _, want := range []string{
+		"for origin in " + origins + "; do",
+		`elif [ "$behind" -eq 0 ]; then`,
+		"compare data --dir /work/pgcopydb",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("verify script missing %q:\n%s", want, script)
+		}
+	}
+	if !strings.HasSuffix(script, "exit 1") ||
+		strings.Count(script, "exit 1") != 1 ||
+		strings.Index(script, "if compare_data_strict") > strings.Index(script, "exit 1") {
+		t.Fatalf("verify script must refuse only after compare data:\n%s", script)
+	}
+}
+
+// TestBuildVerifyJob_SingleWorkerUnchanged pins the drain script for walWorkers
+// unset or 1 to its text from before WAL workers: one origin, one log line.
+func TestBuildVerifyJob_SingleWorkerUnchanged(t *testing.T) {
+	const progressGate = "echo '{}'\n"
+	for _, n := range []int32{0, 1} {
+		m := passwordMigration()
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: n}
+		job, err := buildVerifyJob(m, "img", progressGate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origin := pgcopydb.SlotName(m.Namespace, m.Name)
+		want := `set -eu
+` + dataComparisonPrelude(m) + dataComparisonStrict(m) + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
+progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '` + sentinel.ZeroLSN + `')")
+gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
+echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap"
+` + cloneCountersBlock(progressGate) + `if [ "$endpos" = "` + sentinel.ZeroLSN + `" ]; then
+  echo "the work dir reports no cutover endpos, so the origin has nothing to be measured against. Deciding by content."
+elif [ "$gap" -eq 0 ]; then
+  echo "drain verified: origin progress $progress equals endpos $endpos, nothing left to apply"
+  exit 0
+else
+  echo "the origin is $gap bytes from endpos, and no distance decides the drain in either direction: unapplied commits and publication-filtered WAL measure alike. Deciding by content."
+fi
+` + partialDrainGuard(m) + `if compare_data_strict; then
+  echo "drain verified: pgcopydb compare data found all migrated tables matching"
+  exit 0
+fi
+echo "drain refuted: pgcopydb compare data did not show the target matching the source (the compare lines above say whether it found a difference or could not produce a verdict); do not switch applications to the target (the replication slot is kept)"
+exit 1`
+		if got := job.Spec.Template.Spec.Containers[0].Args[1]; got != want {
+			t.Fatalf("walWorkers %d: the single-worker drain script drifted:\n%s", n, got)
+		}
 	}
 }
 

@@ -723,11 +723,15 @@ kubectl delete pod <pod> --grace-period=0 --force
 ### The verify pod runs for a long time
 
 The Migration stays in `CuttingOver`, and the `<name>-verify` pod runs for a long time.
-The target's origin lands exactly on the cutover LSN only when nothing wrote on the source between the last applied commit and the approval.
-Nearly every cutover therefore proves the drain by content instead.
+With one WAL stream, the target's origin lands exactly on the cutover LSN only when nothing wrote on the source after the last applied commit.
+Nearly every such cutover therefore proves the drain by content instead.
+With `spec.follow.walWorkers` above 1, each worker moves its origin to the cutover LSN when it finishes.
+In that case, a long verify means that at least one worker origin is not on the cutover LSN.
 `pgcopydb compare data` checksums every migrated table.
 The database size sets how long that scan takes, not the remaining lag.
 The Job logs `endpos`, `replay_lsn`, and `origin_progress` before the compare starts, so its log names the path that it took.
+With `spec.follow.walWorkers` above 1, the Job logs one such line for each WAL worker, and the `origin` field names its replication origin.
+A line with an `origin_gap_bytes` other than 0 names an origin that is not on the cutover LSN.
 
 Wait for the scan.
 Plan the write-downtime window around it.
@@ -747,6 +751,8 @@ No data is lost at the source: the slot stays and retains WAL.
 The verify Job logs name the differing tables.
 They also print `endpos`, `replay_lsn`, and `origin_progress`.
 A `replay_lsn` below `endpos` means that the stream was never consumed to the cutover LSN.
+When a WAL worker has no replication origin on the target, the Job stops before the compare.
+Its log shows the `psql` error that names the origin.
 The simplest recovery is:
 
 1. Keep running on the source.

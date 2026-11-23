@@ -284,10 +284,7 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	// WAL filtering and skipped records make gap/replay_lsn unsafe tolerances.
 	// Require exact nonzero endpos or validated content, including report checks.
 	// See docs/research/measurements.md#cutover-verification.
-	script := `set -eu
-` + dataComparisonPrelude(m) + dataComparisonStrict(m) + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
-replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
-progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '` + sentinel.ZeroLSN + `')")
+	drain := `progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '` + sentinel.ZeroLSN + `')")
 gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
 echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap"
 ` + cloneCountersBlock(progressGate) + `if [ "$endpos" = "` + sentinel.ZeroLSN + `" ]; then
@@ -298,7 +295,14 @@ elif [ "$gap" -eq 0 ]; then
 else
   echo "the origin is $gap bytes from endpos, and no distance decides the drain in either direction: unapplied commits and publication-filtered WAL measure alike. Deciding by content."
 fi
-` + partialDrainGuard(m) + `if compare_data_strict; then
+`
+	if f := m.Spec.Follow; f != nil && f.WalWorkers > 1 {
+		drain = workerOriginsDrain(pgcopydb.WorkerSlots(origin, f.WalWorkers), progressGate)
+	}
+	script := `set -eu
+` + dataComparisonPrelude(m) + dataComparisonStrict(m) + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
+` + drain + partialDrainGuard(m) + `if compare_data_strict; then
   echo "drain verified: pgcopydb compare data found all migrated tables matching"
   exit 0
 fi
@@ -308,6 +312,29 @@ exit 1`
 	// bare /bin/sh once shipped verification that failed auth and falsely
 	// refuted every password-based drain (found live).
 	return scriptJob(m, runnerImage, verifyJobName(m), script, false)
+}
+
+// workerOriginsDrain is the fast path over every WAL worker origin, named like its
+// slot: pgcopydb moves each finished worker's origin to endpos. A missing origin
+// makes pg_replication_origin_progress raise, and set -e then fails the Job.
+func workerOriginsDrain(origins []string, progressGate string) string {
+	n := fmt.Sprint(len(origins))
+	return `behind=0
+for origin in ` + strings.Join(origins, " ") + `; do
+  progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('$origin', true)::text, '` + sentinel.ZeroLSN + `')")
+  gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
+  echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap origin=$origin"
+  [ "$gap" -eq 0 ] || behind=$((behind + 1))
+done
+` + cloneCountersBlock(progressGate) + `if [ "$endpos" = "` + sentinel.ZeroLSN + `" ]; then
+  echo "the work dir reports no cutover endpos, so the origins have nothing to be measured against. Deciding by content."
+elif [ "$behind" -eq 0 ]; then
+  echo "drain verified: origin progress equals endpos $endpos on all ` + n + ` WAL worker origins, nothing left to apply"
+  exit 0
+else
+  echo "$behind of ` + n + ` WAL worker origins are not at endpos, and no distance decides the drain in either direction: unapplied commits and publication-filtered WAL measure alike. Deciding by content."
+fi
+`
 }
 
 // buildCatalogJob reads pgcopydb's catalog once a plain clone's worker has

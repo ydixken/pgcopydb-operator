@@ -150,8 +150,8 @@ That feedback does not move the target replication origin or the sentinel's data
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
 Other supported runner versions differ.
 See [client tool versions](../reference/prerequisites.md#client-tool-versions).
-After cutover, when the target replication origin is exactly on the frozen endpos, the drain verification proves this.
-Where the origin is not on endpos, the drain verification compares content.
+After cutover, when each target replication origin (one for each WAL worker) is exactly on the frozen endpos, the drain verification proves this.
+Where an origin is not on endpos, the drain verification compares content.
 In the first case, the proof depends only on the origin bookkeeping of the runner.
 
 > [!warning]
@@ -236,10 +236,14 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 
     The fast path passes only when the target's replication origin is exactly on the cutover LSN.
     When any distance remains, the content decides, never the size of the distance.
-    Nearly every cutover takes the compare path.
+    With one WAL stream, nearly every cutover takes the compare path, and the exact-LSN pass is the exception.
     Size the write-downtime window for `compare data` over the selected storage tables.
     A [rehearsal](verification.md#rehearsal) measures the duration of that compare while the migration still streams.
-    Treat the exact-LSN pass as the exception.
+
+    With `spec.follow.walWorkers` above 1, each WAL worker has its own replication origin, and the fast path needs all of them exactly on the cutover LSN.
+    Each worker moves its origin to the cutover LSN when it finishes, also when its tables got no changes.
+    Thus a clean cutover usually passes on the fast path and does not run `compare data`.
+    When one origin is not on the cutover LSN, the content decides.
 
     The Job runs `pgcopydb compare data` and checks the report that `--json` prints.
     It does not rely on the exit status alone.
