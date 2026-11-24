@@ -58,8 +58,9 @@ func stalledSequenceReset() {
 
 	By("holding the target sequence while the worker finishes its follow")
 	const session = "e2e_follow_seq_hold"
+	// ALTER SEQUENCE holds two lock modes on the sequence, so count the relation once.
 	release := holdOnTargetFor(session, "ALTER SEQUENCE "+sequence+" INCREMENT BY 1",
-		"SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"+
+		"SELECT count(DISTINCT l.relation) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"+
 			" WHERE a.application_name = '"+session+"' AND l.relation = '"+sequence+"'::regclass AND l.granted",
 		40*time.Minute)
 	approveCutover(m.Name)
