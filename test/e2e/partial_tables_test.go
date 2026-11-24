@@ -30,16 +30,20 @@ import (
 
 var _ = Describe("Explicit partial table policies", SpecPriority(2), func() {
 	It("keeps both UNLOGGED modes through resume and verifies the followed tables at cutover", func() {
-		m, full, slot := publicationRetryFixture("e2e-unlogged-policies")
-		empty, once := full+"_empty", full+"_once"
+		// Registered before the fixture, so it runs after the fixture's diagnostics and Migration delete.
+		var empty, once string
 		DeferCleanup(func() {
-			if m.UID != "" {
-				deletePublicationRetryMigration(m)
-			}
 			for _, cluster := range []string{sourceCluster, targetCluster} {
-				psql(cluster, "DROP TABLE IF EXISTS "+empty+", "+once)
+				if empty != "" {
+					psql(cluster, "DROP TABLE IF EXISTS "+empty+", "+once)
+				}
 			}
 		})
+		m, full, slot := publicationRetryFixture("e2e-unlogged-policies")
+		empty, once = full+"_empty", full+"_once"
+		// Each resume spends an attempt, and Longhorn deletes the resumed worker pod when its
+		// volume remounts on another node, so the deliberate resume needs one spare attempt.
+		m.Spec.BackoffLimit = 2
 		psql(sourceCluster, asSourceAppRole()+"CREATE UNLOGGED TABLE "+empty+
 			" (id int PRIMARY KEY, payload text); CREATE UNLOGGED TABLE "+once+
 			" (id int PRIMARY KEY, payload text); INSERT INTO "+empty+
@@ -80,16 +84,17 @@ var _ = Describe("Explicit partial table policies", SpecPriority(2), func() {
 	})
 
 	It("streams INSERTs without a replica identity while source UPDATE and DELETE succeed and stay local", func() {
-		m, full, _ := publicationRetryFixture("e2e-insert-only-policy")
-		events := full + "_events"
+		// Registered before the fixture, so it runs after the fixture's diagnostics and Migration delete.
+		var events string
 		DeferCleanup(func() {
-			if m.UID != "" {
-				deletePublicationRetryMigration(m)
-			}
 			for _, cluster := range []string{sourceCluster, targetCluster} {
-				psql(cluster, "DROP TABLE IF EXISTS "+events)
+				if events != "" {
+					psql(cluster, "DROP TABLE IF EXISTS "+events)
+				}
 			}
 		})
+		m, full, _ := publicationRetryFixture("e2e-insert-only-policy")
+		events = full + "_events"
 		psql(sourceCluster, asSourceAppRole()+"CREATE TABLE "+events+
 			" (id int, payload text); INSERT INTO "+events+" VALUES (1, 'initial')")
 		m.Spec.Clone.Filters.IncludeOnlyTables = []string{full, events}
