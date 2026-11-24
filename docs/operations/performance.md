@@ -10,7 +10,7 @@ Do not assume that the target is the bottleneck.
 ## Follow receive and apply
 
 The bundled pgcopydb carries the fork PRs that the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md) lists.
-Fork PRs #27 to #30 raise its follow throughput:
+Fork PRs #27 to #30 and #43 raise its follow throughput:
 
 1. Apply waits on the receive pipe only after a pass that found nothing to do.
    Apply also returns from the pipeline sync as soon as the sync result is in ([#27](https://github.com/ydixken/pgcopydb/pull/27)).
@@ -22,6 +22,8 @@ Fork PRs #27 to #30 raise its follow throughput:
    A batch commits when receive drains the replication socket, or when the batch is 50 ms old.
    A batch also commits at every flush and close, and before a file rotation.
 1. Apply commits several source transactions in one target transaction, an apply group ([#30](https://github.com/ydixken/pgcopydb/pull/30)).
+1. Receive prepares its SQLite insert statements one time, and apply prepares its two read statements one time ([#43](https://github.com/ydixken/pgcopydb/pull/43)).
+   In a receive drain test, receive went from 39.2k to 100.4k rows/s (2.55x), and the spooled rows were byte-identical.
 
 Apply still sends each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement.
 Because of this, a burst of these DELETEs on such a table applies more slowly than on a keyed table.
@@ -104,6 +106,66 @@ The after values include the SQLite batch commit:
 > The conservative mixed-window ratios are about 330x on Longhorn and 164x on NVMe.
 > These ratios are speedups of the receive window, not speedups of the end-to-end migration.
 > These individual bursts do not establish sustained throughput, and they do not measure target WAL durability waits.
+
+### WAL workers
+
+With one stream, one target connection applies all changes.
+[Apply groups](#apply-groups) decrease the commit cost of that connection, but apply, not receive, is usually the slowest step of follow.
+[`spec.follow.walWorkers`](../configuration.md#wal-workers) runs N streams, and each stream has its own apply connection.
+Thus N target connections apply changes at the same time.
+
+Use `walWorkers` when both of these conditions are true:
+
+- The lag increases while the source writes, and apply is the slowest step.
+  When receive or source decoding is the slowest step, more workers do not help.
+- The writes go to more than one table.
+  pgcopydb gives each table to one worker, so more workers do not make the apply of one table faster.
+
+Use `highTrafficTables` when a small number of tables get most of the writes.
+Each listed table then gets a worker that it does not share with another listed table.
+Without the list, pgcopydb divides the tables by their write counts in `pg_stat_user_tables`.
+These counts start at the last statistics reset, so they can be different from the current write rate.
+
+Each worker has these costs:
+
+- Every worker decodes the full WAL on the source, also the WAL of the tables of other workers.
+  Thus the decoding load on the source increases with each worker.
+  Do not set more workers than the source CPU and disk can decode.
+- Each worker slot keeps WAL on the source until that worker applies it.
+  The slowest worker sets the WAL retention and the lag that `CaughtUp` uses.
+- Each worker uses approximately two target connections.
+- The foreign-key build occurs in the cutover window ([Cutover with WAL workers](live-migration.md#cutover-with-wal-workers)).
+- Until cutover, the target can show only one part of a source transaction that changed tables of two workers.
+
+Rehearse catch-up with the intended workload and the intended number of workers.
+
+#### What we measured with WAL workers
+
+We measured a build of fork commit `ff7b023` (`0.18.155.gff7b023`) on 2026-11-23 and 2026-11-24, on one 14-CPU machine under podman.
+Apart from tests, its code is the same as the bundled `0.18.157.g5fa0950`.
+Source and target ran PostgreSQL 18.7, with CPU quotas of 4 for the source, 2 for the target, and 8 for pgcopydb and pgbench.
+The workload has 32 table units of 100,000 rows: 4 hot tables, foreign-key pairs, tables without a key, a partitioned family, and an idle table.
+pgbench wrote a backlog of 1.28 million transactions while no worker ran, then pgcopydb drained it to endpos.
+Each variant ran three times on a new target, and `pgcopydb compare data` passed after every run.
+
+| Variant | Drain time per run | Median speedup |
+| --- | ---: | ---: |
+| `walWorkers: 1` | 274.1, 274.9, 276.0 s | 1x |
+| `walWorkers: 8` | 140.1, 139.3, 143.2 s | 1.96x |
+| `walWorkers: 8`, `highTrafficTables` | 127.3, 128.4, 128.6 s | 2.14x |
+
+The `highTrafficTables` list named the 4 hot tables and the heaviest other table.
+
+Before WAL workers, we ran separate `pgcopydb follow` processes on `0.18.144.g86bf908`, one for each table group.
+The median drain times were 270.8 s for 1 process, 215.5 s for 2, 137.5 s for 4, and 115.7 s for 8.
+With 32 processes, one for each table unit, the median was 126.8 s.
+During the drain, the source used 7.8 CPU seconds for 1 process, 48.8 for 8, and 157.0 for 32.
+At a fixed offered write rate, 32 streams decreased the write throughput of the source to 91.6% of that rate.
+At two times that rate, the throughput decreased to 51.3%.
+With 8 streams, the values were 100% and 70.1%.
+For this reason, the fork uses a fixed number of workers with table groups, not one stream for each table.
+8 workers in one process with `highTrafficTables` took 128.4 s, 11% more than 8 separate processes at 115.7 s.
+We did not find the cause of this difference.
 
 ## What the operator decides
 

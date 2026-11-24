@@ -363,6 +363,16 @@ spec:
                   enabled:
                     description: enabled turns the migration into a live one.
                     type: boolean
+                  highTrafficTables:
+                    description: |-
+                      highTrafficTables lists schema-qualified tables that each get a WAL
+                      worker of their own and never share one with each other.
+                    items:
+                      pattern: ^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
                   insertOnlyTables:
                     description: |-
                       insertOnlyTables copies the initial rows and follows INSERTs only.
@@ -452,6 +462,15 @@ spec:
                       number would lose. Only meaningful with plugin wal2json; admission
                       rejects it under any other plugin.
                     type: boolean
+                  walWorkers:
+                    description: |-
+                      walWorkers is the number of parallel CDC streams pgcopydb runs, each with
+                      its own replication slot and target replication origin. Unset or 1 keeps
+                      the single stream. It reaches pgcopydb as PGCOPYDB_WAL_WORKERS.
+                    format: int32
+                    maximum: 16
+                    minimum: 1
+                    type: integer
                 type: object
                 x-kubernetes-validations:
                 - message: follow is immutable
@@ -471,6 +490,24 @@ spec:
                   rule: '!has(self.insertOnlyTables) || size(self.insertOnlyTables)
                     == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin)
                     || self.plugin == ''pgoutput'') && !has(self.publication) && !has(self.slotName))'
+                - message: walWorkers above 1 requires follow.enabled, plugin pgoutput,
+                    no publication, and no unloggedTables or insertOnlyTables
+                  rule: '!has(self.walWorkers) || self.walWorkers <= 1 || (has(self.enabled)
+                    && self.enabled && (!has(self.plugin) || self.plugin == ''pgoutput'')
+                    && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables)
+                    == 0) && (!has(self.insertOnlyTables) || size(self.insertOnlyTables)
+                    == 0))'
+                - message: walWorkers above 1 requires a slotName of at most 51 characters
+                  rule: '!has(self.walWorkers) || self.walWorkers <= 1 || !has(self.slotName)
+                    || size(self.slotName) <= 51'
+                - message: highTrafficTables requires walWorkers above 1 and at most
+                    walWorkers entries
+                  rule: '!has(self.highTrafficTables) || size(self.highTrafficTables)
+                    == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables)
+                    <= self.walWorkers)'
+                - message: slotName must not end in _w<digits> or _t<digits>, which
+                    WAL workers use for their slots and publications
+                  rule: '!has(self.slotName) || !self.slotName.matches(''_[wt][0-9]+$'')'
               preflight:
                 description: preflight tunes optional preflight gates.
                 properties:
@@ -2184,6 +2221,10 @@ spec:
                 produces no JSON verdict in this mode'
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.verification) && has(self.verification.data) && self.verification.data)'
+            - message: follow.walWorkers above 1 cannot be combined with clone.allDatabases
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers
+                > 1)'
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
@@ -2374,6 +2415,34 @@ spec:
                     type: string
                   slotName:
                     type: string
+                  workers:
+                    description: workers holds one entry per replication slot when
+                      walWorkers is above 1.
+                    items:
+                      description: |-
+                        ReplicationWorkerStatus is the replay position of one WAL worker slot when
+                        walWorkers is above 1. The aggregate ReplicationStatus fields hold the
+                        minimum over all slots.
+                      properties:
+                        lagBytes:
+                          description: lagBytes is the byte distance between the source
+                            WAL head and replayLSN.
+                          format: int64
+                          type: integer
+                        replayLSN:
+                          description: replayLSN is source-visible replay feedback
+                            for this slot.
+                          type: string
+                        slotName:
+                          description: slotName is the replication slot of this worker.
+                          type: string
+                      required:
+                      - slotName
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - slotName
+                    x-kubernetes-list-type: map
                   writeLSN:
                     description: |-
                       writeLSN is the walsender's write position, with slot confirmed-flush fallback
@@ -2981,6 +3050,16 @@ spec:
                   enabled:
                     description: enabled turns the migration into a live one.
                     type: boolean
+                  highTrafficTables:
+                    description: |-
+                      highTrafficTables lists schema-qualified tables that each get a WAL
+                      worker of their own and never share one with each other.
+                    items:
+                      pattern: ^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
                   insertOnlyTables:
                     description: |-
                       insertOnlyTables copies the initial rows and follows INSERTs only.
@@ -3070,6 +3149,15 @@ spec:
                       number would lose. Only meaningful with plugin wal2json; admission
                       rejects it under any other plugin.
                     type: boolean
+                  walWorkers:
+                    description: |-
+                      walWorkers is the number of parallel CDC streams pgcopydb runs, each with
+                      its own replication slot and target replication origin. Unset or 1 keeps
+                      the single stream. It reaches pgcopydb as PGCOPYDB_WAL_WORKERS.
+                    format: int32
+                    maximum: 16
+                    minimum: 1
+                    type: integer
                 type: object
                 x-kubernetes-validations:
                 - message: follow is immutable
@@ -3089,6 +3177,24 @@ spec:
                   rule: '!has(self.insertOnlyTables) || size(self.insertOnlyTables)
                     == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin)
                     || self.plugin == ''pgoutput'') && !has(self.publication) && !has(self.slotName))'
+                - message: walWorkers above 1 requires follow.enabled, plugin pgoutput,
+                    no publication, and no unloggedTables or insertOnlyTables
+                  rule: '!has(self.walWorkers) || self.walWorkers <= 1 || (has(self.enabled)
+                    && self.enabled && (!has(self.plugin) || self.plugin == ''pgoutput'')
+                    && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables)
+                    == 0) && (!has(self.insertOnlyTables) || size(self.insertOnlyTables)
+                    == 0))'
+                - message: walWorkers above 1 requires a slotName of at most 51 characters
+                  rule: '!has(self.walWorkers) || self.walWorkers <= 1 || !has(self.slotName)
+                    || size(self.slotName) <= 51'
+                - message: highTrafficTables requires walWorkers above 1 and at most
+                    walWorkers entries
+                  rule: '!has(self.highTrafficTables) || size(self.highTrafficTables)
+                    == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables)
+                    <= self.walWorkers)'
+                - message: slotName must not end in _w<digits> or _t<digits>, which
+                    WAL workers use for their slots and publications
+                  rule: '!has(self.slotName) || !self.slotName.matches(''_[wt][0-9]+$'')'
               preflight:
                 description: preflight tunes optional preflight gates.
                 properties:
@@ -4802,6 +4908,10 @@ spec:
                 produces no JSON verdict in this mode'
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.verification) && has(self.verification.data) && self.verification.data)'
+            - message: follow.walWorkers above 1 cannot be combined with clone.allDatabases
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers
+                > 1)'
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
@@ -4992,6 +5102,34 @@ spec:
                     type: string
                   slotName:
                     type: string
+                  workers:
+                    description: workers holds one entry per replication slot when
+                      walWorkers is above 1.
+                    items:
+                      description: |-
+                        ReplicationWorkerStatus is the replay position of one WAL worker slot when
+                        walWorkers is above 1. The aggregate ReplicationStatus fields hold the
+                        minimum over all slots.
+                      properties:
+                        lagBytes:
+                          description: lagBytes is the byte distance between the source
+                            WAL head and replayLSN.
+                          format: int64
+                          type: integer
+                        replayLSN:
+                          description: replayLSN is source-visible replay feedback
+                            for this slot.
+                          type: string
+                        slotName:
+                          description: slotName is the replication slot of this worker.
+                          type: string
+                      required:
+                      - slotName
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - slotName
+                    x-kubernetes-list-type: map
                   writeLSN:
                     description: |-
                       writeLSN is the walsender's write position, with slot confirmed-flush fallback

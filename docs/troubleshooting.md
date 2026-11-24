@@ -399,14 +399,18 @@ The attempt starts when the origin is free.
 
 ### `CaughtUp` stays False
 
-`CaughtUp` stays False in three cases:
+`CaughtUp` stays False in four cases:
 
 - The lag is above `follow.maxCatchupLag`.
 - Only one below-threshold sample has arrived.
 - No replication sample exists yet.
+- With `spec.follow.walWorkers` above 1, the base copy finished, and the source has the slots of some WAL workers, but not of all of them.
+  Before the base copy finishes, a missing slot gives no sample.
 
 With one below-threshold sample, the reason is `ConfirmingCatchUp`.
 That reason clears on the next sample.
+With missing WAL worker slots, the reason is `WorkerSlotMissing`, and the message names the missing slots.
+When the source has none of the WAL worker slots, the operator gets no sample, and `CaughtUp` keeps its value.
 
 Read `status.replication.lagBytes`.
 If heavy write traffic keeps the lag high, throttle the traffic or raise the threshold.
@@ -579,12 +583,26 @@ The operator drops only an orphan that has no source slot, and pgcopydb then ret
 An explicit `spec.follow.publication` value bypasses this guard, and so does any plugin other than `pgoutput`, such as `wal2json` and `test_decoding`.
 A retry that [starts over](#phase-failed-with-reason-snapshotlost) runs `pgcopydb stream cleanup` before the guard, so it finds neither the slot nor the automatic publication.
 
+With `spec.follow.walWorkers` above 1, pgcopydb creates one publication for each table, with the name `<slot>_t<table oid>`.
+No publication has the name of the slot.
+A retry keeps these publications when the source slot exists.
+When the source slot does not exist and no WAL worker slot (`<slot>_w<k>`) exists, the retry drops these publications as orphans.
+A retry that starts over also drops the WAL worker objects before the guard.
+On the source, it drops the WAL worker slots and the per-table publications.
+On the target, it drops the WAL worker origins.
+The operator finds these objects from the slot name, so it also drops them when the work volume is lost.
+
 The bundled runner also fixes an interrupted setup when the retry creates a fresh slot and the work catalog has no sentinel row.
 Not every runner version has this bootstrap recovery.
 See [client tool versions](reference/prerequisites.md#client-tool-versions).
 If a retained slot has missing or unreadable sentinel state, the setup fails closed and does not rebuild established progress.
 
 `publication retry refused: source slot "..." exists but auto publication "..." is missing` means that the source state is inconsistent.
+With WAL workers, two other messages also show an inconsistent source state:
+
+- `publication retry refused: source slot "..." exists but no WAL worker publication "..._t<table oid>" exists`
+- `publication retry refused: WAL worker slots "..._w<k>" exist but source slot "..." is missing`
+
 The attempt fails before pgcopydb starts.
 A catalog-query error or a publication-drop error also stops it.
 Read the worker log.
@@ -717,7 +735,8 @@ Then run a fresh Migration.
 ### `CutoverStalled` is True
 
 `CutoverStalled=True` means pgcopydb logged that follow reached endpos, but the worker did not exit within 15 minutes.
-`Streaming=False` with reason `FollowDone` replaces `Replaying` while pgcopydb finishes its sequence work.
+`Streaming=False` with reason `FollowDone` replaces `Replaying` while pgcopydb finishes its post-drain work, including sequence synchronization.
+With multiple WAL workers, the operator waits for the message that all workers reached endpos, not the message from one worker.
 Once `CloneCompleted` is True, the operator stops sentinel reads and endpos nudges when it sees this marker.
 
 Read the worker log.
@@ -758,11 +777,17 @@ kubectl delete pod <pod> --grace-period=0 --force
 ### The verify pod runs for a long time
 
 The Migration stays in `CuttingOver`, and the `<name>-verify` pod runs for a long time.
-The target's origin lands exactly on the cutover LSN only when nothing wrote on the source between the last applied commit and the approval.
-Nearly every cutover therefore proves the drain by content instead.
+With one WAL stream, an exact landing on the cutover LSN needs a quiet source.
+The target's origin lands there only when nothing wrote on the source between the last applied commit and the approval.
+WAL that the source writes after the approval is beyond endpos.
+Nearly every such cutover therefore proves the drain by content instead.
+With `spec.follow.walWorkers` above 1, each worker moves its origin to the cutover LSN when it finishes.
+In that case, a long verify means that at least one worker origin is not on the cutover LSN.
 `pgcopydb compare data` checksums every migrated table.
 The database size sets how long that scan takes, not the remaining lag.
 The Job logs `endpos`, `replay_lsn`, and `origin_progress` before the compare starts, so its log names the path that it took.
+With `spec.follow.walWorkers` above 1, the Job logs one such line for each WAL worker, and the `origin` field names its replication origin.
+A line with an `origin_gap_bytes` other than 0 names an origin that is not on the cutover LSN.
 
 Wait for the scan.
 Plan the write-downtime window around it.
@@ -771,8 +796,13 @@ A verify Job that fails runs once more before the Migration fails, so a refusal 
 
 ### Phase `Failed` with reason `DrainIncomplete`
 
-Phase `Failed` with reason `DrainIncomplete` means that the verify Job found changes below the cutover LSN that the target does not have.
-`pgcopydb compare data` reported differing tables.
+Phase `Failed` with reason `DrainIncomplete` has two causes:
+
+- The verify Job found changes below the cutover LSN that the target does not have.
+- With `spec.follow.walWorkers` above 1, a WAL worker has no replication origin on the target, and the Job compares no data.
+
+For a missing origin, the Job stops before the compare, and its log shows the `psql` error that names the origin.
+For missing changes, `pgcopydb compare data` reported differing tables.
 The typical cause is a crash inside the drain window.
 After such a crash, pgcopydb `--resume` exits 0 without replaying.
 With a runner older than `0.18.98.g944abcc`, apply that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).

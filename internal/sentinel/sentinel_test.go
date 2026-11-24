@@ -19,8 +19,10 @@ package sentinel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +63,12 @@ const (
 	writeLSN  = "0/2000"
 	replayLSN = "0/1000"
 	headLSN   = "0/3000"
+)
+
+// The worker slots the multi-slot cases name beside the base slot "s".
+const (
+	slotW1 = "s_w1"
+	slotW2 = "s_w2"
 )
 
 func TestParseLSN(t *testing.T) {
@@ -129,6 +137,35 @@ func TestToStatus(t *testing.T) {
 	}
 	if (*State)(nil).ToStatus("x") != nil {
 		t.Fatal("nil state must yield nil status")
+	}
+	if rs.Workers != nil {
+		t.Fatalf("a single-slot sample must not list workers: %+v", rs.Workers)
+	}
+}
+
+// TestToStatus_Workers: each worker slot gets its own replay and lag beside the
+// aggregate, with the same absent-not-zero rule for unknown values.
+func TestToStatus_Workers(t *testing.T) {
+	s := &State{WriteLSN: "0/24", SourceHead: "0/30", Workers: []WorkerState{
+		{SlotName: "s", ReplayLSN: "0/28"},
+		{SlotName: slotW1, ReplayLSN: ""},
+		{SlotName: slotW2, ReplayLSN: ZeroLSN},
+	}}
+	rs := s.ToStatus("s")
+	if len(rs.Workers) != 3 {
+		t.Fatalf("workers: %+v", rs.Workers)
+	}
+	if w := rs.Workers[0]; w.SlotName != "s" || w.ReplayLSN != "0/28" || w.LagBytes == nil || *w.LagBytes != 0x8 {
+		t.Fatalf("measured worker: %+v", w)
+	}
+	if w := rs.Workers[1]; w.SlotName != slotW1 || w.ReplayLSN != "" || w.LagBytes != nil {
+		t.Fatalf("a worker without replay must have no position and no lag: %+v", w)
+	}
+	if w := rs.Workers[2]; w.ReplayLSN != "" || w.LagBytes == nil || *w.LagBytes != 0x30 {
+		t.Fatalf("a null replay renders empty but still lags by the whole head: %+v", w)
+	}
+	if rs.SlotName != "s" || rs.WriteLSN != "0/24" || rs.ReplayLSN != "" || rs.LagBytes != nil {
+		t.Fatalf("an unknown aggregate replay must leave replay and lag absent: %+v", rs)
 	}
 }
 
@@ -275,14 +312,87 @@ func TestParseSample(t *testing.T) {
 	}}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := parseSample([]byte(c.out))
-			switch {
-			case c.want == nil && got != nil:
-				t.Fatalf("want no sample, got %+v", *got)
-			case c.want != nil && got == nil:
-				t.Fatalf("want %+v, got no sample", *c.want)
-			case c.want != nil && *got != *c.want:
-				t.Fatalf("got %+v, want %+v", *got, *c.want)
+			got, err := parseSample([]byte(c.out), []string{"s"})
+			if err != nil {
+				t.Fatalf("a single slot never errors, got %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("got %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestParseSample_WorkerSlots: above one slot the aggregate is the slowest
+// worker, a worker without a position makes the aggregate unknown instead of
+// the minimum of the others, and a slot the source lacks is an error.
+func TestParseSample_WorkerSlots(t *testing.T) {
+	two := []string{"s", slotW1}
+	three := []string{"s", slotW1, slotW2}
+	cases := []struct {
+		name    string
+		slots   []string
+		out     string
+		want    *State
+		missing string
+	}{{
+		name:  "two slots, minimum of each position",
+		slots: two,
+		out:   "source_head=0/3000\nslot=s write_lsn=0/2000 replay_lsn=0/1800\nslot=s_w1 write_lsn=0/2800 replay_lsn=0/1000\n",
+		want: &State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN, Workers: []WorkerState{
+			{SlotName: "s", ReplayLSN: "0/1800"}, {SlotName: slotW1, ReplayLSN: replayLSN},
+		}},
+	}, {
+		// Rows arrive in any order; workers follow the requested order. The
+		// LSNs compare as numbers: 0/F000 sorts after 0/10000 as text.
+		name:  "three slots, numeric minimum",
+		slots: three,
+		out: "source_head=0/20000\nslot=s_w2 write_lsn=0/18000 replay_lsn=0/F000\n" +
+			"slot=s write_lsn=0/10000 replay_lsn=0/10000\nslot=s_w1 write_lsn=0/12000 replay_lsn=0/11000\n",
+		want: &State{WriteLSN: "0/10000", ReplayLSN: "0/F000", SourceHead: "0/20000", Workers: []WorkerState{
+			{SlotName: "s", ReplayLSN: "0/10000"}, {SlotName: slotW1, ReplayLSN: "0/11000"}, {SlotName: slotW2, ReplayLSN: "0/F000"},
+		}},
+	}, {
+		name:  "a slot without replay leaves the aggregate replay unknown",
+		slots: three,
+		out: "source_head=0/3000\nslot=s write_lsn=0/2000 replay_lsn=0/2000\n" +
+			"slot=s_w1 write_lsn=0/2000 replay_lsn=\nslot=s_w2 write_lsn=0/2000 replay_lsn=0/1000\n",
+		want: &State{WriteLSN: writeLSN, SourceHead: headLSN, Workers: []WorkerState{
+			{SlotName: "s", ReplayLSN: writeLSN}, {SlotName: slotW1}, {SlotName: slotW2, ReplayLSN: replayLSN},
+		}},
+	}, {
+		name:    "one slot missing",
+		slots:   three,
+		out:     "source_head=0/3000\nslot=s write_lsn=0/2000 replay_lsn=0/1000\nslot=s_w1 write_lsn=0/2000 replay_lsn=0/1000\n",
+		missing: slotW2,
+	}, {
+		name:    "two slots missing",
+		slots:   three,
+		out:     "source_head=0/3000\nslot=s_w1 write_lsn=0/2000 replay_lsn=0/1000\n",
+		missing: "s, s_w2",
+	}, {
+		name:  "no slot rows",
+		slots: three,
+		out:   "source_head=0/3000\n",
+	}, {
+		name:  "garbage",
+		slots: two,
+		out:   "psql: error: connection to server failed: FATAL: sslmode=require\n",
+	}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseSample([]byte(c.out), c.slots)
+			if c.missing != "" {
+				if !errors.Is(err, ErrSlotMissing) || !strings.HasSuffix(err.Error(), ": "+c.missing) || got != nil {
+					t.Fatalf("want ErrSlotMissing naming %q and no sample, got (%+v, %v)", c.missing, got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("got %+v, want %+v", got, c.want)
 			}
 		})
 	}
@@ -300,37 +410,56 @@ func TestParseSample(t *testing.T) {
 // watch again, it fails. It cannot prove the semantics, because no fake
 // answers two real LSN sources.
 func TestReadScript(t *testing.T) {
-	script := readScript("ns_mig_1")
+	one := readScript([]string{"ns_mig_1"})
+	// One slot keeps its untagged query byte for byte.
+	if one != `psql "$PGCOPYDB_SOURCE_PGURI" -XAtq -F ' ' `+
+		`-c "select 'source_head=' || pg_current_wal_flush_lsn()" `+
+		`-c "select 'write_lsn=' || coalesce(coalesce(r.write_lsn, s.confirmed_flush_lsn)::text, ''), `+
+		`'replay_lsn=' || coalesce(coalesce(r.replay_lsn, s.confirmed_flush_lsn)::text, '') `+
+		`from pg_replication_slots s `+
+		`left join pg_stat_replication r on r.pid = s.active_pid where s.slot_name = 'ns_mig_1'"; exit 0` {
+		t.Fatalf("single-slot script changed:\n%s", one)
+	}
+	multi := readScript([]string{"ns_mig_1", "ns_mig_1_w1", "ns_mig_1_w2"})
 	for _, want := range []string{
-		"where s.slot_name = 'ns_mig_1'",
-		"pg_current_wal_flush_lsn()",
-		"coalesce(r.write_lsn, s.confirmed_flush_lsn)",
-		"coalesce(r.replay_lsn, s.confirmed_flush_lsn)",
-		"exit 0",
+		"select 'slot=' || s.slot_name, 'write_lsn=' ||",
+		"where s.slot_name in ('ns_mig_1', 'ns_mig_1_w1', 'ns_mig_1_w2')",
 	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("script misses %q:\n%s", want, script)
+		if !strings.Contains(multi, want) {
+			t.Fatalf("worker script misses %q:\n%s", want, multi)
 		}
 	}
-	// The lag path reads the source and only the source.
-	for _, forbidden := range []string{
-		"pg_replication_origin",
-		"PGCOPYDB_TARGET_PGURI",
-	} {
-		if strings.Contains(script, forbidden) {
-			t.Fatalf("the lag path must not read %q; that is the drain check's job:\n%s", forbidden, script)
+	for _, script := range []string{one, multi} {
+		for _, want := range []string{
+			"pg_current_wal_flush_lsn()",
+			"coalesce(r.write_lsn, s.confirmed_flush_lsn)",
+			"coalesce(r.replay_lsn, s.confirmed_flush_lsn)",
+			"exit 0",
+		} {
+			if !strings.Contains(script, want) {
+				t.Fatalf("script misses %q:\n%s", want, script)
+			}
 		}
-	}
-	// Nothing in the watch may open the worker's catalogs any more.
-	if strings.Contains(script, "pgcopydb") {
-		t.Fatalf("the watch must not run pgcopydb:\n%s", script)
+		// The lag path reads the source and only the source.
+		for _, forbidden := range []string{
+			"pg_replication_origin",
+			"PGCOPYDB_TARGET_PGURI",
+		} {
+			if strings.Contains(script, forbidden) {
+				t.Fatalf("the lag path must not read %q; that is the drain check's job:\n%s", forbidden, script)
+			}
+		}
+		// Nothing in the watch may open the worker's catalogs any more.
+		if strings.Contains(script, "pgcopydb") {
+			t.Fatalf("the watch must not run pgcopydb:\n%s", script)
+		}
 	}
 }
 
 func TestRead_NoPodOrFailedExecIsNoSample(t *testing.T) {
 	// No running pod: (nil, nil), the previous sample stands.
 	c, _ := fakeAPI(t, nil, false)
-	st, err := c.Read(context.Background(), "ns", "j", "s")
+	st, err := c.Read(context.Background(), "ns", "j", []string{"s"})
 	if err != nil || st != nil {
 		t.Fatalf("no pod: want (nil, nil), got (%v, %v)", st, err)
 	}
@@ -338,7 +467,7 @@ func TestRead_NoPodOrFailedExecIsNoSample(t *testing.T) {
 	// also (nil, nil), never a reconcile error.
 	var rec *execRecorder
 	c, rec = fakeAPI(t, []corev1.Pod{runningPod()}, false)
-	st, err = c.Read(context.Background(), "ns", "j", "s")
+	st, err = c.Read(context.Background(), "ns", "j", []string{"s"})
 	if err != nil || st != nil {
 		t.Fatalf("exec refused: want (nil, nil), got (%v, %v)", st, err)
 	}
@@ -372,7 +501,7 @@ func TestRead_NoPodOrFailedExecIsNoSample(t *testing.T) {
 
 func TestRead_ListError(t *testing.T) {
 	c, _ := fakeAPI(t, nil, true)
-	if _, err := c.Read(context.Background(), "ns", "j", "s"); err == nil {
+	if _, err := c.Read(context.Background(), "ns", "j", []string{"s"}); err == nil {
 		t.Fatal("want error when the pod list fails")
 	}
 }
@@ -381,17 +510,29 @@ func TestRead_FullSample(t *testing.T) {
 	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
 	rec.script(map[string]string{"pg_replication_slots": "source_head=0/3000\n" +
 		"write_lsn=0/2000 replay_lsn=0/1000\n"})
-	st, err := c.Read(context.Background(), "ns", "j", "s")
+	st, err := c.Read(context.Background(), "ns", "j", []string{"s"})
 	if err != nil || st == nil {
 		t.Fatalf("want a sample, got (%v, %v)", st, err)
 	}
-	want := State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN}
-	if *st != want {
-		t.Fatalf("sample = %+v, want %+v", *st, want)
+	want := &State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN}
+	if !reflect.DeepEqual(st, want) {
+		t.Fatalf("sample = %+v, want %+v", st, want)
 	}
 	// The whole point of the rewrite: one exec per pass, and it is psql.
 	if cmds := rec.commands(); len(cmds) != 1 {
 		t.Fatalf("want exactly one exec per pass, got %d", len(cmds))
+	}
+}
+
+// TestRead_WorkerSlotMissing: the controller learns of a missing worker slot
+// only through Read's error, so Read must pass it on rather than drop it.
+func TestRead_WorkerSlotMissing(t *testing.T) {
+	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	rec.script(map[string]string{"pg_replication_slots": "source_head=0/3000\n" +
+		"slot=s write_lsn=0/2000 replay_lsn=0/1000\n"})
+	st, err := c.Read(context.Background(), "ns", "j", []string{"s", slotW1})
+	if !errors.Is(err, ErrSlotMissing) || st != nil {
+		t.Fatalf("want (nil, ErrSlotMissing), got (%v, %v)", st, err)
 	}
 }
 

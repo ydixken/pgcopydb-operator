@@ -49,11 +49,17 @@ case "$*" in
 esac
 `
 
-// The stand-in for the server: the two origin queries answer from the case,
-// and anything read off stdin is the report query, whose verdict the compare
-// stubs in compare_data_test.go already cover in detail.
+// The stand-in for the server: the origin queries answer from STUB_* (WAL worker 1's
+// from STUB_W1_*), and stdin carries the report query that compare_data_test.go covers.
 const stubVerifyPsql = `#!/bin/sh
 case "$*" in
+  *"_w1', true)"*)
+    if [ "$STUB_W1_PROGRESS" = missing ]; then
+      echo 'ERROR:  replication origin does not exist' >&2
+      exit 1
+    fi
+    echo "$STUB_W1_PROGRESS" ;;
+  *"'${STUB_W1_PROGRESS:-unset}'::pg_lsn)"*) echo "$STUB_W1_GAP" ;;
   *pg_replication_origin_progress*) echo "$STUB_PROGRESS" ;;
   *pg_wal_lsn_diff*) echo "$STUB_GAP" ;;
   *pg_largeobject_metadata*)
@@ -241,6 +247,84 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			// The measurements a human reads off a refusal, on every path.
 			if !strings.Contains(out, "endpos="+ep+" replay_lsn="+ep) {
 				t.Fatalf("the drain line must carry endpos and replay_lsn:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestVerifyScript_WorkerOrigins: with two WAL workers the fast path needs both
+// origins on endpos, and a missing origin fails the Job before any verdict.
+func TestVerifyScript_WorkerOrigins(t *testing.T) {
+	const endpos, behind = "0/92E17EB0", "0/92E17AA0"
+	const originsBehind = "1 of 2 WAL worker origins are not at endpos"
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: 2}
+	for _, tc := range []struct {
+		name string
+		// endpos defaults to the const; w0 and w1 are the two origins' progress.
+		endpos, w0, w1 string
+		code           int
+		// wantPath is the line that names the path taken, wantLog the verdict.
+		wantPath, wantLog string
+		wantCompare       bool
+	}{
+		{
+			name: "both origins on endpos", w0: endpos, w1: endpos,
+			wantLog: "drain verified: origin progress equals endpos " + endpos + " on all 2 WAL worker origins",
+		},
+		{
+			name: "worker 1 behind", w0: endpos, w1: behind,
+			wantPath: originsBehind, wantLog: wantContentPass, wantCompare: true,
+		},
+		{
+			name: "worker 0 behind", w0: behind, w1: endpos,
+			wantPath: originsBehind, wantLog: wantContentPass, wantCompare: true,
+		},
+		{
+			name:   "no endpos to prove anything against",
+			endpos: sentinel.ZeroLSN, w0: sentinel.ZeroLSN, w1: sentinel.ZeroLSN,
+			wantPath: "the origins have nothing to be measured against", wantLog: wantContentPass, wantCompare: true,
+		},
+		{name: "worker 1 origin missing", w0: endpos, w1: "missing", code: 1, wantLog: "replication origin does not exist"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ep := tc.endpos
+			if ep == "" {
+				ep = endpos
+			}
+			gap := func(progress string) string {
+				if progress == ep {
+					return "0"
+				}
+				return "1040"
+			}
+			out, code := runMigrationVerifyScript(t, m, "", reportMatching,
+				"STUB_ENDPOS="+ep, "STUB_REPLAY="+ep, "STUB_PROGRESS="+tc.w0, "STUB_GAP="+gap(tc.w0),
+				"STUB_W1_PROGRESS="+tc.w1, "STUB_W1_GAP="+gap(tc.w1))
+			if code != tc.code {
+				t.Fatalf("exit = %d, want %d\n%s", code, tc.code, out)
+			}
+			for _, want := range []string{tc.wantPath, tc.wantLog} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log missing %q:\n%s", want, out)
+				}
+			}
+			if got := strings.Contains(out, verifyCompareMarker); got != tc.wantCompare {
+				t.Fatalf("content check ran = %v, want %v:\n%s", got, tc.wantCompare, out)
+			}
+			if tc.code != 0 {
+				if strings.Contains(out, "drain verified") {
+					t.Fatalf("a missing origin must never read as drained:\n%s", out)
+				}
+				return
+			}
+			if n := strings.Count(out, "endpos="+ep+" replay_lsn="+ep+" origin_progress="); n != 2 {
+				t.Fatalf("%d drain lines, want one per origin:\n%s", n, out)
+			}
+			for _, origin := range []string{effectiveSlotName(m), effectiveSlotName(m) + "_w1"} {
+				if !strings.Contains(out, " origin="+origin+"\n") {
+					t.Fatalf("no drain line names origin %s:\n%s", origin, out)
+				}
 			}
 		})
 	}

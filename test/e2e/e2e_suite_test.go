@@ -3084,11 +3084,12 @@ type liveWriter struct {
 	// stopOnce lets the spec's cleanup call stop after the spec already did.
 	stopOnce sync.Once
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	command  commandFactory
-	interval time.Duration
-	timeout  time.Duration
+	ctx       context.Context
+	cancel    context.CancelFunc
+	command   commandFactory
+	statement func(marker string, n int) string
+	interval  time.Duration
+	timeout   time.Duration
 
 	mu   sync.Mutex
 	pod  string
@@ -3173,8 +3174,15 @@ func (w *liveWriter) diagnostics() liveWriterDiagnostic {
 // startLiveWriter resolves the source primary before it returns the writer.
 // Call stop to close and reap the persistent child.
 func startLiveWriter(marker string) *liveWriter {
+	return startLiveWriterOf(marker, liveOrderStatement)
+}
+
+// startLiveWriterOf writes statement(marker, n) for n = 1, 2, ... The final marker
+// query reads orders, so each statement must insert the orders row noted marker-n.
+func startLiveWriterOf(marker string, statement func(string, int) string) *liveWriter {
 	return startLiveWriterWith(
 		marker,
+		statement,
 		primaryPod,
 		exec.CommandContext,
 		liveWriteInterval,
@@ -3182,8 +3190,14 @@ func startLiveWriter(marker string) *liveWriter {
 	)
 }
 
+// liveOrderStatement inserts the orders row noted marker-n.
+func liveOrderStatement(marker string, n int) string {
+	return fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) VALUES (1, 1.00, '%s-%d');\n", marker, n)
+}
+
 func startLiveWriterWith(
 	marker string,
+	statement func(string, int) string,
 	primary func(string) string,
 	command commandFactory,
 	interval, timeout time.Duration,
@@ -3191,15 +3205,16 @@ func startLiveWriterWith(
 	pod := primary(sourceCluster)
 	writerCtx, cancel := context.WithCancel(context.Background())
 	w := &liveWriter{
-		stopCh:   make(chan struct{}),
-		reaped:   make(chan struct{}),
-		done:     make(chan struct{}),
-		ctx:      writerCtx,
-		cancel:   cancel,
-		command:  command,
-		interval: interval,
-		timeout:  timeout,
-		pod:      pod,
+		stopCh:    make(chan struct{}),
+		reaped:    make(chan struct{}),
+		done:      make(chan struct{}),
+		ctx:       writerCtx,
+		cancel:    cancel,
+		command:   command,
+		statement: statement,
+		interval:  interval,
+		timeout:   timeout,
+		pod:       pod,
 		diag: liveWriterDiagnostic{
 			startedAt: time.Now(), childExit: liveWriterNotStarted,
 			queryExit: liveWriterNotStarted, queryResult: liveWriterQueryNotRun,
@@ -3376,10 +3391,7 @@ func (w *liveWriter) run(marker string) {
 		case <-ticker.C:
 		}
 
-		statement := fmt.Sprintf(
-			"INSERT INTO orders (customer_id, amount, note) VALUES (1, 1.00, '%s-%d');\n",
-			marker, n,
-		)
+		statement := w.statement(marker, n)
 		written, err := io.WriteString(stdin, statement)
 		writtenAt := time.Now()
 		w.mu.Lock()

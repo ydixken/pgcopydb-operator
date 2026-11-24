@@ -57,16 +57,23 @@ func TestFollowArgs_Full(t *testing.T) {
 	}
 }
 
+// slotNameCases pins the generated names: a changed name orphans the slot of
+// every running migration across an operator upgrade.
+var slotNameCases = []struct{ ns, name, want string }{
+	{"shop", "to-cnpg", "pgcopydb_shop_to_cnpg_d1b80e9c"},
+	{"UPPER-case", "We.ird--Name", "pgcopydb_upper_case_we_ird__name_299733ab"},
+	{strings.Repeat("verylongnamespace", 5), strings.Repeat("verylongname", 6),
+		"pgcopydb_verylongnamespaceverylongnamespaceverylongnam_09bed1b0"},
+}
+
 func TestSlotName(t *testing.T) {
 	valid := regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
-	cases := []struct{ ns, name string }{
-		{"shop", "to-cnpg"},
-		{"UPPER-case", "We.ird--Name"},
-		{strings.Repeat("verylongnamespace", 5), strings.Repeat("verylongname", 6)},
-	}
 	seen := map[string]bool{}
-	for _, c := range cases {
+	for _, c := range slotNameCases {
 		s := SlotName(c.ns, c.name)
+		if s != c.want {
+			t.Fatalf("SlotName(%q, %q) = %q, want %q", c.ns, c.name, s, c.want)
+		}
 		if !valid.MatchString(s) {
 			t.Fatalf("invalid slot name %q for %v", s, c)
 		}

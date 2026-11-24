@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -109,7 +110,7 @@ func removeMigration(ctx context.Context, name string) {
 // fakeSentinel scripts the sentinel the way envtest scripts Job status: tests
 // set the state (or an error), the reconciler reads it. calls counts every
 // exec (reads, endpos sets, and nudges); nudges counts the endpos nudges on
-// their own, and slots records the slot name each read was given.
+// their own, and slots records the slot list each read was given.
 type fakeSentinel struct {
 	mu        sync.Mutex
 	state     *sentinel.State
@@ -120,14 +121,14 @@ type fakeSentinel struct {
 	calls     int
 	nudges    int
 	sets      int
-	slots     []string
+	slots     [][]string
 }
 
-func (f *fakeSentinel) Read(_ context.Context, _, _, slotName string) (*sentinel.State, error) {
+func (f *fakeSentinel) Read(_ context.Context, _, _ string, slots []string) (*sentinel.State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	f.slots = append(f.slots, slotName)
+	f.slots = append(f.slots, slots)
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -604,7 +605,9 @@ var _ = Describe("Migration Controller follow mode", func() {
 		// The endpos the operator set is its own to remember: nothing reads
 		// it back out of the worker any more.
 		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
-		Expect(fake.slots).To(ContainElement(effectiveSlotName(m)))
+		// A single stream reads its one slot and lists no workers.
+		Expect(fake.slots).To(HaveEach(Equal([]string{effectiveSlotName(m)})))
+		Expect(m.Status.Replication.Workers).To(BeEmpty())
 		Expect(fake.setCount()).To(Equal(1))
 
 		// Every later pass reads the same caught-up stream and must recognise
@@ -706,6 +709,49 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeFalse())
 	})
 
+	It("waits for all WAL workers before reporting follow done", func() {
+		const name = "mig-follow-workers-stalled"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		markerAt := time.Date(2026, 8, 9, 10, 2, 0, 0, time.UTC)
+		now := markerAt
+		r.now = func() time.Time { return now }
+
+		mig := followMigration(name, v1beta1.CutoverAutomatic)
+		mig.Spec.Follow.WalWorkers = 2
+		Expect(k8sClient.Create(ctx, mig)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
+		reconcileAndGet(ctx, r, name)
+		m := confirmCaughtUp(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+
+		logs.tsOut += markerAt.Format(time.RFC3339Nano) +
+			` {"message":"Follow mode is now done, reached endpos 0/100"}` + "\n"
+		calls := fake.callCount()
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt).To(BeNil())
+		Expect(fake.callCount()).To(BeNumerically(">", calls))
+		now = markerAt.Add(followWorkerExitGrace)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeFalse())
+
+		logs.tsOut += now.Format(time.RFC3339Nano) +
+			` {"message":"Follow mode is now done, 2 WAL workers reached endpos 0/100, lowest replay_lsn is 0/100"}` + "\n"
+		calls = fake.callCount()
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(Equal(now))
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionStreaming).Reason).To(Equal(reasonFollowDone))
+		Expect(fake.callCount()).To(Equal(calls))
+		now = now.Add(followWorkerExitGrace)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeTrue())
+	})
+
 	It("keeps what a half-answered sample did not learn", func() {
 		const name = "mig-follow-partial"
 		defer removeMigration(ctx, name)
@@ -803,6 +849,162 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(fake.setCount()).To(BeZero())
 		m = confirmCaughtUp(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+	})
+
+	// workerState scripts a sample of three WAL worker slots at workerHead,
+	// with the aggregate replay the sentinel derives from the per-slot ones.
+	const workerHead = "0/4000000"
+	workerState := func(slots []string, aggregate string, replays ...string) *sentinel.State {
+		st := &sentinel.State{WriteLSN: workerHead, ReplayLSN: aggregate, SourceHead: workerHead}
+		for i, slot := range slots {
+			st.Workers = append(st.Workers, sentinel.WorkerState{SlotName: slot, ReplayLSN: replays[i]})
+		}
+		return st
+	}
+	caughtUpReason := func(m *v1beta1.Migration) string {
+		GinkgoHelper()
+		c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
+		Expect(c).NotTo(BeNil())
+		return c.Reason
+	}
+	workerMigration := func(name string, mode v1beta1.CutoverMode) *v1beta1.Migration {
+		m := followMigration(name, mode)
+		m.Spec.Follow.WalWorkers = 3
+		return m
+	}
+
+	It("holds CaughtUp while one of three WAL worker slots lags", func() {
+		const name = "mig-workers-lag"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		r.Logs = cloneDoneLogs()
+		m := workerMigration(name, v1beta1.CutoverAutomatic)
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+		slots := pgcopydb.WorkerSlots(effectiveSlotName(m), 3)
+
+		// Two slots sit at the head and the middle one trails by 48 MiB, so the
+		// stream as a whole is that far behind, however near the others are.
+		const behind = "0/1000000"
+		fake.state = workerState(slots, behind, workerHead, behind, workerHead)
+		for range 2 {
+			m = reconcileAndGet(ctx, r, name)
+			Expect(caughtUpReason(m)).To(Equal(reasonLagging))
+		}
+		Expect(fake.setCount()).To(BeZero())
+		Expect(fake.slots).To(HaveEach(Equal(slots)))
+		Expect(*m.Status.Replication.LagBytes).To(Equal(int64(0x3000000)))
+		Expect(m.Status.Replication.Workers).To(HaveLen(3))
+		Expect(m.Status.Replication.Workers[1].SlotName).To(Equal(slots[1]))
+		Expect(*m.Status.Replication.Workers[1].LagBytes).To(Equal(int64(0x3000000)))
+		Expect(*m.Status.Replication.Workers[0].LagBytes).To(BeZero())
+
+		// The slow worker catches up: the usual two samples, then the cutover.
+		fake.state = workerState(slots, workerHead, workerHead, workerHead, workerHead)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonConfirmingCatchUp))
+		Expect(fake.setCount()).To(BeZero())
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+		Expect(fake.setCount()).To(Equal(1))
+	})
+
+	It("never cuts over while a WAL worker slot is missing, and restarts the CaughtUp count after one", func() {
+		const name = "mig-workers-missing"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		logs := copyingLogs()
+		r.Logs = logs
+		m := workerMigration(name, v1beta1.CutoverManual)
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+		slots := pgcopydb.WorkerSlots(effectiveSlotName(m), 3)
+		missing := fmt.Errorf("%w: %s", sentinel.ErrSlotMissing, slots[2])
+		low := workerState(slots, workerHead, workerHead, workerHead, workerHead)
+
+		// During the base copy a missing slot is no sample: nothing is reported.
+		fake.readErr = missing
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(m.Status.Replication).To(BeNil())
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeNil())
+
+		// After the copy it breaks the pair a below-threshold sample started.
+		logs.tsOut += cloneDoneLine
+		fake.readErr, fake.state = nil, low
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonConfirmingCatchUp))
+		fake.readErr = missing
+		m = reconcileAndGet(ctx, r, name)
+		caughtUp := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
+		Expect(caughtUp.Status).To(Equal(metav1.ConditionFalse))
+		Expect(caughtUp.Reason).To(Equal(reasonWorkerSlotMissing))
+		Expect(caughtUp.Message).To(ContainSubstring(slots[2]))
+		fake.readErr = nil
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonConfirmingCatchUp))
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
+
+		// Approval while a slot is missing sets no endpos, and the phase stops
+		// claiming catch-up.
+		m.Spec.Cutover.Approved = true
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		fake.readErr = missing
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonWorkerSlotMissing))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		Expect(sentinel.EndposSet(m.Status.Replication.Endpos)).To(BeFalse())
+		Expect(fake.setCount()).To(BeZero())
+		Expect(fake.nudgeCount()).To(BeZero())
+
+		fake.readErr = nil
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonConfirmingCatchUp))
+		Expect(fake.setCount()).To(BeZero())
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(fake.setCount()).To(Equal(1))
+	})
+
+	It("restarts the CaughtUp count when a WAL worker slot has no replay position", func() {
+		const name = "mig-workers-unmeasured"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		r.Logs = cloneDoneLogs()
+		m := workerMigration(name, v1beta1.CutoverAutomatic)
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+		slots := pgcopydb.WorkerSlots(effectiveSlotName(m), 3)
+		low := workerState(slots, workerHead, workerHead, workerHead, workerHead)
+
+		fake.state = low
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonConfirmingCatchUp))
+
+		// One slot reports no replay, so the sample measured no lag. Unlike a
+		// single stream, it borrows nothing from the last one: a borrowed zero
+		// would complete the pair and cut over here.
+		fake.state = workerState(slots, "", workerHead, "", workerHead)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonLagging))
+		Expect(m.Status.Replication.LagBytes).To(BeNil())
+		Expect(m.Status.Replication.ReplayLSN).To(BeEmpty())
+		Expect(fake.setCount()).To(BeZero())
+
+		fake.state = low
+		m = reconcileAndGet(ctx, r, name)
+		Expect(caughtUpReason(m)).To(Equal(reasonConfirmingCatchUp))
+		Expect(fake.setCount()).To(BeZero())
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+		Expect(fake.setCount()).To(Equal(1))
 	})
 
 	It("fails loudly when drain verification is refuted", func() {

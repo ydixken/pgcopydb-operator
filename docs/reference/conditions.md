@@ -84,7 +84,7 @@ Four are abnormal-true: True reports a problem.
 | `CloneCompleted` | normal-true | The base copy finished. |
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
 | `CaughtUp` | normal-true | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
-| `CutoverCompleted` | normal-true | The drain is proven: a clean data compare, or origin progress exactly at the cutover LSN on the rare cutover where the two coincide. With `clone.ownerAfterRestore` set, the handover finished first. |
+| `CutoverCompleted` | normal-true | The drain is proven: a clean data compare, or origin progress exactly at the cutover LSN. With one WAL stream, the two coincide only on rare cutovers. With `spec.follow.walWorkers` above 1, every worker origin must be on the cutover LSN, which is usual after a clean finish. With `clone.ownerAfterRestore` set, the handover finished first. |
 | `CutoverStalled` | abnormal-true | pgcopydb reached endpos, but the follow worker did not exit within 15 minutes. |
 | `OwnershipApplied` | normal-true | The restored objects belong to `clone.ownerAfterRestore`. The condition is present only when the spec sets that field. |
 | `Verified` | normal-true | Every requested `pgcopydb compare` found source and target matching. |
@@ -113,15 +113,16 @@ This table lists every reason that the controller sets, spelled exactly as it ap
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished, and pgcopydb's catalog, where it could be read, counted every table done. |
 | `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the worker logged that the base copy finished. The pass's own sample found no table that holds rows on the source and none on the target. The tables that `TablesEmptyOnTarget` does not count do not count here either. Change replay also took control. |
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
-| `Streaming` | `False` | `FollowDone` | pgcopydb reached endpos and is completing post-drain sequence synchronization. |
+| `Streaming` | `False` | `FollowDone` | pgcopydb reached endpos and is completing post-drain work, including sequence synchronization. |
 | `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
-| `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
+| `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. With `spec.follow.walWorkers` above 1, the lag is the lag of the slowest WAL worker slot. A sample that does not measure the replay position of each slot also sets this reason. |
 | `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator needs a second consecutive one before it sets `CaughtUp` True. A single sample can land while the worker still acknowledges its raw receive position. At that point, the lag reads near zero, whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging`, and the count restarts. |
+| `CaughtUp` | `False` | `WorkerSlotMissing` | `spec.follow.walWorkers` is above 1, the base copy finished, and the source has the replication slots of some WAL workers, but not of all of them. The message names the missing slots. When the source has none of the WAL worker slots, the operator gets no sample, and `CaughtUp` keeps its value. The operator does not start the cutover. When a sample finds all the slots again, the count of consecutive samples restarts. |
 | `CutoverCompleted` | `Unknown` | `RehearsalPodRemains` | The worker drained, and the drain verify waits until the pod of a canceled verification rehearsal ends. The message names the pod and its node. The controller deletes the condition after the pod ends, and the result of the verify then sets it. |
-| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. For any other reading, the verify decides by content. Nearly every cutover takes this path, because publication-filtered WAL and unapplied commits measure alike. The worker applies changes and syncs sequences. |
-| `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change: `pgcopydb compare data` found a difference or gave no verdict. The Migration fails with the same reason. |
+| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. For any other reading, the verify decides by content. With one WAL stream, nearly every cutover takes this path, because publication-filtered WAL and unapplied commits measure alike. With `spec.follow.walWorkers` above 1, the origin of each WAL worker must sit on the cutover LSN. Each worker moves its origin there when it finishes cleanly, so a clean cutover passes without the compare. In other cases, the verify runs `pgcopydb compare data`. The worker applies changes and syncs sequences. |
+| `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change: `pgcopydb compare data` found a difference or gave no verdict. A WAL worker without its replication origin on the target also fails the verify Job. The Migration fails with the same reason. |
 | `CutoverStalled` | `True` | `FollowWorkerNotExited` | pgcopydb logged that follow reached endpos, but the worker stayed active for 15 minutes. See [CutoverStalled is True](../troubleshooting.md#cutoverstalled-is-true). |
-| `CutoverStalled` | `False` | `FollowWorkerExited` | A stalled follow worker exited. The drain verification now decides whether cutover is safe. |
+| `CutoverStalled` | `False` | `FollowWorkerExited` | A stalled follow worker exited. The drain verification now checks the replicated data. |
 | `CutoverStalled` | `False` | `FollowWorkerRestarted` | A new follow worker attempt or pod replaced the worker that reached endpos. |
 | `CutoverStalled` | `False` | `FollowWorkerSuspended` | `spec.suspend` stopped the worker. |
 | `OwnershipApplied` | `Unknown` | `OwnershipRunning` | The `<name>-reown` Job is running: after the worker exited on a clone, after the drain is proven on a live migration. No worker restarts while it exists. |
@@ -202,7 +203,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently. The controller tries again on the next pass. |
 | `RehearsalPodRemains` | Warning | The drain verify waits for the pod of a canceled verification rehearsal (action `Cutover`): once when the wait starts, with the condition's message. |
 | `CleanupStarted` | Normal | The controller created the cleanup Job (slot, publication, origin). |
-| `CleanupFailed` | Warning | Cleanup exhausted its retries. The named slot may still hold WAL on the source, and it needs manual removal. |
+| `CleanupFailed` | Warning | Cleanup exhausted its retries. The named slot may still hold WAL on the source, and it needs manual removal. With `spec.follow.walWorkers` above 1, the message also names each WAL worker slot. |
 | `OwnershipStarted` | Normal | The controller created the `<name>-reown` handover Job. |
 | `OwnershipApplied` | Normal | The handover finished. The restored objects belong to `clone.ownerAfterRestore`. |
 | `Suspended` | Normal | `spec.suspend` deleted the worker, and a running handover Job with it. The work volume stays. |

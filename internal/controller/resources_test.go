@@ -42,12 +42,13 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
 	pgoutputPlugin           = "pgoutput"
-	patchedVersionForTest    = "0.18.144.g86bf908"
+	patchedVersionForTest    = "0.18.157.g5fa0950"
 	featureRunOwner          = "run-owner"
 	extensionFixtureName     = "citext"
 	extensionBuiltin         = "plpgsql"
@@ -298,10 +299,10 @@ func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
 			}{
 				jobKindWorker:    {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
 				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
-				"retry gate":     {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
+				jobKindGate:      {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
 				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},
 				jobKindVerify:    {func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") }, false},
-				"catalog":        {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
+				jobKindCatalog:   {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
 				"compare data":   {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) }, false},
 				"compare schema": {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) }, false},
 				"reown":          {func() (*batchv1.Job, error) { return buildReownJob(m, "img") }, false},
@@ -437,6 +438,71 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	}
 }
 
+// TestBuildVerifyJob_WorkerOriginsPredicate: with WAL workers the script reads every
+// worker origin, passes fast only with none behind, and refuses only after compare data.
+func TestBuildVerifyJob_WorkerOriginsPredicate(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: 3}
+	job, err := buildVerifyJob(m, "img", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := job.Spec.Template.Spec.Containers[0].Args[1]
+	origins := strings.Join(pgcopydb.WorkerSlots(effectiveSlotName(m), 3), " ")
+	for _, want := range []string{
+		"for origin in " + origins + "; do",
+		`elif [ "$behind" -eq 0 ]; then`,
+		"compare data --dir /work/pgcopydb",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("verify script missing %q:\n%s", want, script)
+		}
+	}
+	if !strings.HasSuffix(script, "exit 1") ||
+		strings.Count(script, "exit 1") != 1 ||
+		strings.Index(script, "if compare_data_strict") > strings.Index(script, "exit 1") {
+		t.Fatalf("verify script must refuse only after compare data:\n%s", script)
+	}
+}
+
+// TestBuildVerifyJob_SingleWorkerUnchanged pins the drain script for walWorkers
+// unset or 1 to its text from before WAL workers: one origin, one log line.
+func TestBuildVerifyJob_SingleWorkerUnchanged(t *testing.T) {
+	const progressGate = "echo '{}'\n"
+	for _, n := range []int32{0, 1} {
+		m := passwordMigration()
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: n}
+		job, err := buildVerifyJob(m, "img", progressGate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		origin := pgcopydb.SlotName(m.Namespace, m.Name)
+		want := `set -eu
+` + dataComparisonPrelude(m) + dataComparisonStrict(m) + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
+progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '` + sentinel.ZeroLSN + `')")
+gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
+echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap"
+` + cloneCountersBlock(progressGate) + `if [ "$endpos" = "` + sentinel.ZeroLSN + `" ]; then
+  echo "the work dir reports no cutover endpos, so the origin has nothing to be measured against. Deciding by content."
+elif [ "$gap" -eq 0 ]; then
+  echo "drain verified: origin progress $progress equals endpos $endpos, nothing left to apply"
+  exit 0
+else
+  echo "the origin is $gap bytes from endpos, and no distance decides the drain in either direction: unapplied commits and publication-filtered WAL measure alike. Deciding by content."
+fi
+` + partialDrainGuard(m) + `if compare_data_strict; then
+  echo "drain verified: pgcopydb compare data found all migrated tables matching"
+  exit 0
+fi
+echo "drain refuted: pgcopydb compare data did not show the target matching the source (the compare lines above say whether it found a difference or could not produce a verdict); do not switch applications to the target (the replication slot is kept)"
+exit 1`
+		if got := job.Spec.Template.Spec.Containers[0].Args[1]; got != want {
+			t.Fatalf("walWorkers %d: the single-worker drain script drifted:\n%s", n, got)
+		}
+	}
+}
+
 // TestBuildVerifyJob_CloneCounters: the copy counters ride along in the
 // verify Job, because it is the only pod that may read them (the worker owns
 // its catalog while it lives, and its pod is gone once it does not). They must
@@ -446,8 +512,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -533,7 +599,7 @@ func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()
@@ -564,7 +630,7 @@ func TestJobScripts_ShellValid(t *testing.T) {
 			return buildPreflightJob(syncCommitMigration(false), "img")
 		},
 		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
-		"retry gate":     func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
+		jobKindGate:      func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
 		"retry gate, all databases": func() (*batchv1.Job, error) {
 			all := passwordMigration()
 			all.Spec.Clone.AllDatabases = true
@@ -572,7 +638,7 @@ func TestJobScripts_ShellValid(t *testing.T) {
 		},
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
-		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
+		jobKindCatalog:    func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
 		jobKindRehearsal:  func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
 		"rehearsal, filters": func() (*batchv1.Job, error) {
 			filtered := passwordMigration()
@@ -621,6 +687,9 @@ func TestPublicationDropGuard(t *testing.T) {
 		return m
 	}
 	generated := pgcopydb.SlotName("ns", "m")
+	workers := follow("", "", "", true)
+	workers.Spec.Follow.WalWorkers = 3
+	workerBase := pgcopydb.EffectiveSlotName(&workers.Spec, "ns", "m")
 
 	cases := []struct {
 		name    string
@@ -637,22 +706,40 @@ func TestPublicationDropGuard(t *testing.T) {
 		{"test_decoding has no publication guard", follow("", "", "test_decoding", true), 2, ""},
 		{"disabled follow has no guard", follow("", "", "", false), 2, ""},
 		{"non-follow migration has no guard", passwordMigration(), 2, ""},
+		{"WAL workers guard the per-table publications", workers, 2, workerBase},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			guard := publicationDropGuard(tc.m, tc.attempt)
+			s := "'" + tc.slot + "'"
+			wants := []string{"PGCOPYDB_SOURCE_PGURI", "ON_ERROR_STOP=1",
+				"pg_catalog.pg_replication_slots WHERE slot_name = " + s, "RAISE EXCEPTION"}
+			if tc.m == workers {
+				// No publication named after the slot exists: match S_t<oid> and S_w<k> exactly.
+				wants = append(wants,
+					"pg_catalog.pg_publication WHERE left(pubname, length("+s+")) = "+s+
+						" AND substr(pubname, length("+s+") + 1) ~ '^_t[0-9]+$'",
+					"pg_catalog.pg_replication_slots WHERE left(slot_name, length("+s+")) = "+s+
+						" AND substr(slot_name, length("+s+") + 1) ~ '^_w[0-9]+$'",
+					"EXECUTE format('DROP PUBLICATION %I', p)")
+				if strings.Contains(guard, "pubname = "+s) || strings.Contains(guard, "LIKE") {
+					t.Fatalf("WAL worker guard looks for the single-worker publication or uses LIKE:\n%s", guard)
+				}
+			} else {
+				wants = append(wants, "pg_catalog.pg_publication WHERE pubname = "+s, `DROP PUBLICATION IF EXISTS "`+tc.slot+`"`)
+			}
 			if tc.slot == "" {
 				if guard != "" {
 					t.Fatalf("unexpected guard: %q", guard)
 				}
 			} else {
-				for _, want := range []string{"PGCOPYDB_SOURCE_PGURI", "ON_ERROR_STOP=1",
-					"pg_catalog.pg_replication_slots WHERE slot_name = '" + tc.slot + "'",
-					"pg_catalog.pg_publication WHERE pubname = '" + tc.slot + "'",
-					`DROP PUBLICATION IF EXISTS "` + tc.slot + `"`, "RAISE EXCEPTION"} {
+				for _, want := range wants {
 					if !strings.Contains(guard, want) {
 						t.Fatalf("guard missing %q:\n%s", want, guard)
 					}
+				}
+				if simulateKubeletDollarExpansion(guard) != guard {
+					t.Fatalf("guard does not survive kubelet's $$ expansion:\n%s", guard)
 				}
 			}
 			// The guard must reach the Job's prelude, after the passfile
@@ -1336,6 +1423,160 @@ func TestPreflightScript_DeferIndexes(t *testing.T) {
 	}
 }
 
+// superWalWorkersMigration adds the superuser refs, so the follow checks the
+// stub server answers remediate and pass.
+func superWalWorkersMigration() *v1beta1.Migration {
+	m := walWorkersMigration()
+	super := superMigration()
+	m.Spec.Source.SuperuserSecretRef = super.Spec.Source.SuperuserSecretRef
+	m.Spec.Target.SuperuserSecretRef = super.Spec.Target.SuperuserSecretRef
+	return m
+}
+
+// TestPreflightScriptFor_WalWorkers pins that unset and 1 keep today's script, and
+// that above 1 the WAL worker checks replace the one-slot check and nothing else.
+func TestPreflightScriptFor_WalWorkers(t *testing.T) {
+	one := walWorkersMigration()
+	one.Spec.Follow.WalWorkers = 1
+	one.Spec.Follow.HighTrafficTables = nil
+	off := preflightScriptFor(one)
+	if !strings.Contains(off, slotHeadroomBlock) || strings.Contains(off, pgcopydb.WalWorkersFlag) {
+		t.Fatalf("one worker keeps the one-slot check and no runner probe:\n%s", off)
+	}
+	one.Spec.Follow.WalWorkers = 0
+	if preflightScriptFor(one) != off {
+		t.Fatal("walWorkers 1 must leave the script as it is with walWorkers unset")
+	}
+	m := walWorkersMigration()
+	on := preflightScriptFor(m)
+	for _, want := range []string{
+		"needs 4 free replication slots", "needs 5 free walsenders", "needs 4 free replication origins", "to_regclass",
+	} {
+		if !strings.Contains(on, want) {
+			t.Fatalf("missing %q:\n%s", want, on)
+		}
+	}
+	if strings.Contains(on, slotHeadroomBlock) {
+		t.Fatalf("the N-slot check replaces the one-slot check:\n%s", on)
+	}
+	mustPrecede(t, on, walLevelProbe, pgcopydb.WalWorkersFlag)
+	if strings.Replace(on, walWorkersBlock(m.Spec.Follow), slotHeadroomBlock, 1) != off {
+		t.Fatal("the WAL worker checks must be the only difference")
+	}
+	m.Spec.Follow.HighTrafficTables = nil
+	if s := preflightScriptFor(m); strings.Contains(s, "to_regclass") {
+		t.Fatalf("the table check needs highTrafficTables:\n%s", s)
+	}
+}
+
+// TestPreflightScript_WalWorkers runs the WAL worker checks against a stub
+// server: each short resource and each missing table fails by name.
+func TestPreflightScript_WalWorkers(t *testing.T) {
+	run := followPreflightHarness(t)
+	script := preflightScriptFor(superWalWorkersMigration())
+	pass := []string{
+		"PGCOPYDB_STUB_HELP=  --wal-workers <N>             Number of WAL workers",
+		"PREFLIGHT_RUNNER_IMAGE=img:old",
+		"PREFLIGHT_HIGH_TRAFFIC_TABLES=public.events\npublic.orders",
+		"PSQL_SOURCE_TABLES=public.events\npublic.orders",
+		"PSQL_FREE_SLOTS=4", "PSQL_FREE_WALSENDERS=5", "PSQL_FREE_ORIGINS=4",
+	}
+	t.Run("enough headroom and existing tables pass", func(t *testing.T) {
+		out, code, _ := run(t, script, "", pass...)
+		for _, want := range []string{
+			"ok: runner pgcopydb accepts --wal-workers",
+			"ok: replication slot headroom for 4 WAL workers",
+			"ok: walsender headroom for 4 WAL workers",
+			"ok: replication origin headroom for 4 WAL workers",
+			"ok: high-traffic tables exist on the source",
+			preflightAllChecksPassed,
+		} {
+			if code != 0 || !strings.Contains(out, want) {
+				t.Fatalf("code=%d, missing %q, out:\n%s", code, want, out)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, env, want string }{
+		{"three free slots fail", "PSQL_FREE_SLOTS=3",
+			"preflight: spec.follow.walWorkers 4 needs 4 free replication slots on the source, found 3: raise max_replication_slots"},
+		{"four free walsenders fail", "PSQL_FREE_WALSENDERS=4",
+			"needs 5 free walsenders on the source, one per worker and one for the snapshot connection held during the base copy, found 4"},
+		{"three free origins fail", "PSQL_FREE_ORIGINS=3", "needs 4 free replication origins on the target, found 3"},
+		{"an unreadable origin count fails closed", "PSQL_FREE_ORIGINS=", "replication origins on the target, found none readable"},
+		{"a runner without the flag fails", "PGCOPYDB_STUB_HELP=  --follow   Implement logical decoding",
+			"the pgcopydb in runner image img:old lacks it (pgcopydb clone --help does not list --wal-workers)"},
+		{"every missing table is listed", "PSQL_SOURCE_TABLES=public.c",
+			"spec.follow.highTrafficTables names tables the source does not have: public.events, public.orders"},
+		{"an unreadable table check fails closed", "PSQL_SOURCE_TABLES=fail",
+			"cannot check that the spec.follow.highTrafficTables tables exist on the source"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, _ := run(t, script, "", append(slices.Clone(pass), tc.env)...)
+			if code != 1 || !strings.Contains(out, "preflight failed:") || !strings.Contains(out, tc.want) ||
+				strings.Contains(out, preflightAllChecksPassed) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		})
+	}
+}
+
+// TestBuildPreflightJob_WalWorkersEnv pins the env the WAL worker checks read:
+// the image the worker Jobs run and the newline-joined tables, only above one worker.
+func TestBuildPreflightJob_WalWorkersEnv(t *testing.T) {
+	container := func(m *v1beta1.Migration) corev1.Container {
+		t.Helper()
+		job, err := buildPreflightJob(m, testRunnerImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job.Spec.Template.Spec.Containers[0]
+	}
+	m := walWorkersMigration()
+	m.Spec.Follow.WalWorkers = 1
+	m.Spec.Follow.HighTrafficTables = nil
+	c := container(m)
+	for _, name := range []string{"PREFLIGHT_RUNNER_IMAGE", "PREFLIGHT_HIGH_TRAFFIC_TABLES"} {
+		if got := envValue(c.Env, name); got != "" {
+			t.Fatalf("one worker must not set %s, got %q", name, got)
+		}
+	}
+	m = walWorkersMigration()
+	m.Spec.Runner.Image = "registry.example/runner:custom"
+	c = container(m)
+	if got := envValue(c.Env, "PREFLIGHT_RUNNER_IMAGE"); got != c.Image || got != m.Spec.Runner.Image {
+		t.Fatalf("PREFLIGHT_RUNNER_IMAGE = %q, the preflight runs %q, want spec.runner.image", got, c.Image)
+	}
+	if got := envValue(c.Env, "PREFLIGHT_HIGH_TRAFFIC_TABLES"); got != "public.orders\npublic.events" {
+		t.Fatalf("PREFLIGHT_HIGH_TRAFFIC_TABLES = %q", got)
+	}
+}
+
+// TestPreflightScript_WalWorkersLive runs the headroom and table queries through a
+// real psql; CI supplies PGCOPYDB_TEST_PGURI. One server answers for both sides.
+func TestPreflightScript_WalWorkersLive(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("set PGCOPYDB_TEST_PGURI to a reachable Postgres to run the WAL worker checks")
+	}
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Fatalf("PGCOPYDB_TEST_PGURI is set but psql is missing: %v", err)
+	}
+	cmd := exec.Command(shellPath, "-c", preflightHeader+walWorkersHeadroom(2)+highTrafficTablesBlock)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uri, "PGCOPYDB_TARGET_PGURI="+uri,
+		"PREFLIGHT_HIGH_TRAFFIC_TABLES=pg_catalog.pg_class\npublic.pgm_absent_table")
+	out, err := cmd.CombinedOutput()
+	for _, want := range []string{
+		"ok: replication slot headroom for 2 WAL workers",
+		"ok: walsender headroom for 2 WAL workers",
+		"ok: replication origin headroom for 2 WAL workers",
+		"names tables the source does not have: public.pgm_absent_table\n",
+	} {
+		if err != nil || !strings.Contains(string(out), want) {
+			t.Fatalf("err=%v, missing %q, out:\n%s", err, want, out)
+		}
+	}
+}
+
 const (
 	restoreMajorOK     = "ok: runner pg_restore "
 	restoreMajorUnread = "preflight: cannot read the major version of the runner's pg_restore"
@@ -1748,6 +1989,11 @@ case "$q" in
     esac ;;
   'show synchronous_commit') [ "${PSQL_SYNC_COMMIT-}" = fail ] && exit 2; echo "${PSQL_SYNC_COMMIT:-on}" ;;
   *"'TEMP'"*) [ "${PSQL_TEMP-}" = fail ] && exit 2; echo "${PSQL_TEMP:-1}" ;;
+  *max_active_replication_origins*) [ "$uri" = tgt ] || exit 2; echo "${PSQL_FREE_ORIGINS-5}" ;;
+  *pg_stat_replication*) [ "$uri" = src ] || exit 2; echo "${PSQL_FREE_WALSENDERS-5}" ;;
+  *to_regclass*)
+    [ "${PSQL_SOURCE_TABLES-}" = fail ] && exit 2
+    printf '%s\n' "$list" | grep -vxF "${PSQL_SOURCE_TABLES:-public.a}" | awk 'NR>1{printf ", "}{printf "%s",$0}' ;;
   *wal_sender_timeout*)
     # A server applies options=-c from the URI to the session; emulate that.
     case "$uri" in *wal_sender_timeout%3D60s*) echo "60000|1min|${SRC_MAJOR-16}" ;;
@@ -1786,7 +2032,7 @@ case "$q" in
   *session_replication_role*) if [ -f "$STATE/srr" ]; then exit 0; else exit 1; fi ;;
   *rolsuper*) echo "${ROLSUPER:-1}" ;;
   *wal_level*) echo logical ;;
-  *max_replication_slots*) echo 5 ;;
+  *max_replication_slots*) echo "${PSQL_FREE_SLOTS-5}" ;;
   *relreplident*) printf '%s' "${PSQL_RI_OFFENDERS:-}" ;;
   *pg_namespace*) printf '%s' "${PSQL_SCHEMAS:-public}" ;;
   *current_user*) echo "$role" ;;

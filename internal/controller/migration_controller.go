@@ -827,8 +827,12 @@ func (r *MigrationReconciler) scanWorkerLogs(ctx context.Context, m *v1beta1.Mig
 		r.clearCutoverStalled(m, reasonFollowWorkerRestart,
 			"the follow worker pod changed; waiting for its endpos marker")
 	}
-	if cursor.FollowDoneAt == nil && scan.FollowDoneAt != nil {
-		cursor.FollowDoneAt = &metav1.Time{Time: *scan.FollowDoneAt}
+	doneAt := scan.FollowDoneAt
+	if m.Spec.Follow != nil && m.Spec.Follow.WalWorkers > 1 {
+		doneAt = scan.AllWorkersDoneAt
+	}
+	if cursor.FollowDoneAt == nil && doneAt != nil {
+		cursor.FollowDoneAt = &metav1.Time{Time: *doneAt}
 	}
 	m.Status.WorkerLogCursor = cursor
 	return scan, nil

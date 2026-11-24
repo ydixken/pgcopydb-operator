@@ -203,6 +203,24 @@ func TestScanWorkerLogs_PersistsFollowDoneTime(t *testing.T) {
 	}
 }
 
+func TestScanWorkerLogs_DistinguishesWorkerAndSupervisor(t *testing.T) {
+	first := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	raw := first.Format(time.RFC3339Nano) +
+		` {"message":"Follow mode is now done, reached endpos 0/100"}` + "\n" +
+		first.Add(time.Second).Format(time.RFC3339Nano) +
+		` {"message":"Follow mode is now done, 2 WAL workers reached endpos 0/100, lowest replay_lsn is 0/100"}` + "\n"
+	scan, err := ScanWorkerLogs(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.FollowDoneAt == nil || !scan.FollowDoneAt.Equal(first) {
+		t.Fatalf("worker marker = %v, want %v", scan.FollowDoneAt, first)
+	}
+	if scan.AllWorkersDoneAt == nil || !scan.AllWorkersDoneAt.Equal(first.Add(time.Second)) {
+		t.Fatalf("supervisor marker = %v, want %v", scan.AllWorkersDoneAt, first.Add(time.Second))
+	}
+}
+
 func TestScanWorkerLogs_PersistsSupervisorDeathTime(t *testing.T) {
 	first := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
 	raw := first.Format(time.RFC3339Nano) + ` {"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}` + "\n" +
