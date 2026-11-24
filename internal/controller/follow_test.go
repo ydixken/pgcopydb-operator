@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,8 @@ const jobFailedMsg = "pod failed"
 // caughtUpLSN is the LSN specs park every sentinel field on to script a
 // zero-lag stream.
 const caughtUpLSN = "0/100"
+
+const replacementPodUID = "replacement-pod"
 
 // deletionDriveTimeout bounds the Eventually loops that drive multi-pass
 // deletion flows; envtest passes are fast, this is generous.
@@ -196,16 +199,20 @@ func (c failingPatchClient) Patch(context.Context, client.Object, client.Patch, 
 
 // fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
 // sentinel: tests choose what a pod "logged". out/err serve JobLogs, tsOut
-// and tsErr the timestamped variant the zombie check reads.
+// and tsErr serve the timestamped worker log stream used for follow checks.
 type fakeLogs struct {
 	out string
 	err error
 	// byJob replaces out for the Jobs it names.
 	byJob map[string]string
 	// byUID alone serves JobLogsByUID; a missing UID reads as a Job without pods.
-	byUID map[types.UID]string
-	tsOut string
-	tsErr error
+	byUID              map[types.UID]string
+	tsOut              string
+	tsErr              error
+	streamPodUID       types.UID
+	streamCalls        int
+	lastPreviousPodUID types.UID
+	lastSince          *metav1.Time
 	// gotLines records the last requested tail budget, so tests can prove
 	// the success-path parse asks for the whole log.
 	gotLines int64
@@ -230,8 +237,23 @@ func (f *fakeLogs) JobLogsByUID(_ context.Context, _ string, uid types.UID, _ in
 	return []byte(out), nil
 }
 
-func (f *fakeLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]byte, error) {
-	return []byte(f.tsOut), f.tsErr
+func (f *fakeLogs) JobLogStream(
+	_ context.Context,
+	_, jobName string,
+	_, previousPodUID types.UID,
+	since *metav1.Time,
+) (io.ReadCloser, types.UID, error) {
+	f.streamCalls++
+	f.lastPreviousPodUID = previousPodUID
+	f.lastSince = since
+	if f.tsErr != nil {
+		return nil, "", f.tsErr
+	}
+	podUID := f.streamPodUID
+	if podUID == "" {
+		podUID = types.UID(jobName + "-pod")
+	}
+	return io.NopCloser(strings.NewReader(f.tsOut)), podUID, nil
 }
 
 // The worker log is where the operator reads the end of the base copy, so a
@@ -262,6 +284,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 	followReconciler := func(fake *fakeSentinel) *MigrationReconciler {
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Progress = &fakeProgress{}
 		return r
 	}
 
@@ -607,6 +630,128 @@ var _ = Describe("Migration Controller follow mode", func() {
 			}
 		}
 		Expect(started).To(Equal(1), "one cutover, one announcement")
+	})
+
+	It("reports a stalled follow worker after it reaches endpos", func() {
+		const name = "mig-follow-stalled"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		markerAt := time.Date(2026, 8, 9, 10, 2, 0, 0, time.UTC)
+		now := markerAt.Add(-time.Minute)
+		r.now = func() time.Time { return now }
+
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverAutomatic))).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
+		reconcileAndGet(ctx, r, name)
+		m := confirmCaughtUp(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		nudgeCount := fake.nudgeCount()
+		callCount := fake.callCount()
+
+		logs.tsOut += markerAt.Format(time.RFC3339Nano) +
+			` {"error_severity":"INFO","message":"Follow mode is now done, reached endpos 0/100"}` + "\n"
+		now = markerAt
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		streaming := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionStreaming)
+		Expect(streaming.Status).To(Equal(metav1.ConditionFalse))
+		Expect(streaming.Reason).To(Equal(reasonFollowDone))
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(BeTemporally("==", markerAt))
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeNil())
+		Expect(fake.callCount()).To(Equal(callCount), "the operator must stop reading or nudging the sentinel")
+		Expect(fake.nudgeCount()).To(Equal(nudgeCount))
+
+		now = markerAt.Add(followWorkerExitGrace - time.Second)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeNil())
+
+		now = markerAt.Add(followWorkerExitGrace)
+		m = reconcileAndGet(ctx, r, name)
+		stalled := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverStalled)
+		Expect(stalled).NotTo(BeNil())
+		Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
+		Expect(stalled.Reason).To(Equal(reasonFollowWorkerStalled))
+		Expect(stalled.Message).To(ContainSubstring("15 minutes"))
+
+		logs.tsErr = fmt.Errorf("worker logs unavailable")
+		now = now.Add(time.Second)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeTrue())
+		Expect(fake.callCount()).To(Equal(callCount))
+		logs.tsErr = nil
+
+		logs.streamPodUID = replacementPodUID
+		logs.tsOut = now.Format(time.RFC3339Nano) +
+			` {"error_severity":"INFO","message":"replacement worker started"}` + "\n"
+		m = reconcileAndGet(ctx, r, name)
+		stalled = meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverStalled)
+		Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
+		Expect(stalled.Reason).To(Equal(reasonFollowWorkerRestart))
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt).To(BeNil())
+
+		logs.tsOut += now.Format(time.RFC3339Nano) +
+			` {"error_severity":"INFO","message":"Follow mode is now done, reached endpos 0/100"}` + "\n"
+		reconcileAndGet(ctx, r, name)
+		now = now.Add(followWorkerExitGrace)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeTrue())
+
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		stalled = meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverStalled)
+		Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
+		Expect(stalled.Reason).To(Equal(reasonFollowWorkerExited))
+		Expect(fetchJob(ctx, name+"-verify")).NotTo(BeNil())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeFalse())
+	})
+
+	It("waits for all WAL workers before reporting follow done", func() {
+		const name = "mig-follow-workers-stalled"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		markerAt := time.Date(2026, 8, 9, 10, 2, 0, 0, time.UTC)
+		now := markerAt
+		r.now = func() time.Time { return now }
+
+		mig := followMigration(name, v1beta1.CutoverAutomatic)
+		mig.Spec.Follow.WalWorkers = 2
+		Expect(k8sClient.Create(ctx, mig)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
+		reconcileAndGet(ctx, r, name)
+		m := confirmCaughtUp(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+
+		logs.tsOut += markerAt.Format(time.RFC3339Nano) +
+			` {"message":"Follow mode is now done, reached endpos 0/100"}` + "\n"
+		calls := fake.callCount()
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt).To(BeNil())
+		Expect(fake.callCount()).To(BeNumerically(">", calls))
+		now = markerAt.Add(followWorkerExitGrace)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeFalse())
+
+		logs.tsOut += now.Format(time.RFC3339Nano) +
+			` {"message":"Follow mode is now done, 2 WAL workers reached endpos 0/100, lowest replay_lsn is 0/100"}` + "\n"
+		calls = fake.callCount()
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(BeTemporally("==", now))
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionStreaming).Reason).To(Equal(reasonFollowDone))
+		Expect(fake.callCount()).To(Equal(calls))
+		now = now.Add(followWorkerExitGrace)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeTrue())
 	})
 
 	It("keeps what a half-answered sample did not learn", func() {

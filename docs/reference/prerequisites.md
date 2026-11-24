@@ -5,7 +5,7 @@ Read the keywords MUST, SHOULD, and MAY as RFC 2119 describes them.
 
 This page covers the base clone (`pgcopydb clone`), the whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 The ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/).
-For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/5fa095015df20f509a18ed81ee364ee95ea34ff5).
+For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/9d8b660f412238f4c5c04d29ad40425e12ec57d5).
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record the scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot check.
 
@@ -74,9 +74,14 @@ The check matches that description, not only the flag name, because another pgco
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twenty-two pgcopydb versions, with different guarantees.
+The progress poll supports twenty-three pgcopydb versions, with different guarantees.
 
-The bundled runner, `0.18.157.g5fa0950`, added [WAL workers](#wal-workers) ([fork PR #44](https://github.com/ydixken/pgcopydb/pull/44)).
+The bundled runner, `0.18.159.g9d8b660`, does not copy the publications that pgcopydb creates on the source to the target ([fork PR #45](https://github.com/ydixken/pgcopydb/pull/45)).
+These are the automatic publication or, with `spec.follow.walWorkers` above 1, the per-table publications `<slot>_t<table oid>`.
+Older runners copy them to the target in the post-data step of `pgcopydb clone --follow`, and cleanup does not drop them there.
+Other publications of the source, which include a publication that `spec.follow.publication` names, go to the target with all runners.
+
+`0.18.157.g5fa0950` added [WAL workers](#wal-workers) ([fork PR #44](https://github.com/ydixken/pgcopydb/pull/44)).
 With `0.18.144.g86bf908` and older runners, preflight refuses `spec.follow.walWorkers` above 1, because their `pgcopydb clone --help` does not list `--wal-workers`.
 `0.18.157.g5fa0950` also keeps the SQLite statements of receive and apply prepared, so receive uses less CPU ([fork PR #43](https://github.com/ydixken/pgcopydb/pull/43)).
 

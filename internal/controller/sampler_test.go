@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -550,9 +551,14 @@ type slowLogs struct {
 	delay time.Duration
 }
 
-func (l *slowLogs) JobLogsTimestamps(ctx context.Context, ns, job string, lines int64) ([]byte, error) {
+func (l *slowLogs) JobLogStream(
+	ctx context.Context,
+	ns, job string,
+	jobUID, previousPodUID types.UID,
+	since *metav1.Time,
+) (io.ReadCloser, types.UID, error) {
 	time.Sleep(l.delay)
-	return l.fakeLogs.JobLogsTimestamps(ctx, ns, job, lines)
+	return l.fakeLogs.JobLogStream(ctx, ns, job, jobUID, previousPodUID, since)
 }
 
 func TestSampler_SyncRepConfirmation(t *testing.T) {

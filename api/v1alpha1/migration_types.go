@@ -863,8 +863,7 @@ const (
 )
 
 // Condition type constants. Each is named for what True means: the first eight
-// are normal-true; ConditionFailed, ConditionCommitsBlocked and ConditionRetryHeld
-// are abnormal-true.
+// are normal-true; the rest are abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -874,6 +873,7 @@ const (
 	ConditionOwnershipApplied = "OwnershipApplied"
 	ConditionVerified         = "Verified"
 	ConditionComplete         = "Complete"
+	ConditionCutoverStalled   = "CutoverStalled"
 	ConditionFailed           = "Failed"
 	ConditionCommitsBlocked   = "CommitsBlocked"
 	ConditionRetryHeld        = "RetryHeld"
@@ -985,6 +985,10 @@ type MigrationStatus struct {
 	// +optional
 	VerificationProgress []VerificationProgress `json:"verificationProgress,omitempty"`
 
+	// workerLogCursor stores the timestamped log position for the current follow worker.
+	// +optional
+	WorkerLogCursor *WorkerLogCursor `json:"workerLogCursor,omitempty"`
+
 	// jobName is the current worker Job.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
@@ -993,6 +997,23 @@ type MigrationStatus struct {
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+}
+
+// WorkerLogCursor records the worker log position that survives controller restarts.
+type WorkerLogCursor struct {
+	// jobUID identifies the worker attempt.
+	JobUID string `json:"jobUID"`
+	// podUID identifies the worker pod whose logs the cursor addresses.
+	PodUID string `json:"podUID"`
+	// lastTimestamp is the newest runtime timestamp the controller processed.
+	// +optional
+	LastTimestamp *metav1.Time `json:"lastTimestamp,omitempty"`
+	// supervisorDeathAt remains set until the worker pod is reaped.
+	// +optional
+	SupervisorDeathAt *metav1.Time `json:"supervisorDeathAt,omitempty"`
+	// followDoneAt is when pgcopydb logged that follow reached endpos.
+	// +optional
+	FollowDoneAt *metav1.Time `json:"followDoneAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

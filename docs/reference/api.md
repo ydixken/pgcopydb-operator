@@ -329,6 +329,7 @@ _Appears in:_
 | `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
 | `verificationRehearsal` _[VerificationRehearsalStatus](#verificationrehearsalstatus)_ | verificationRehearsal reports the latest spec.verification.rehearsal run. |  | Optional: \{\} <br /> |
 | `verificationProgress` _[VerificationProgress](#verificationprogress) array_ | verificationProgress holds the latest compare data progress sample of each<br />kind of run. An item stays after its run ends, until the next run of that kind starts. |  | Optional: \{\} <br /> |
+| `workerLogCursor` _[WorkerLogCursor](#workerlogcursor)_ | workerLogCursor stores the timestamped log position for the current follow worker. |  | Optional: \{\} <br /> |
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
@@ -642,5 +643,25 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `storageClassName` _string_ | storageClassName selects the StorageClass; empty uses the cluster default. |  | Optional: \{\} <br /> |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | size is the requested volume size. | 10Gi | Optional: \{\} <br /> |
+
+
+#### WorkerLogCursor
+
+
+
+WorkerLogCursor records the worker log position that survives controller restarts.
+
+
+
+_Appears in:_
+- [MigrationStatus](#migrationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `jobUID` _string_ | jobUID identifies the worker attempt. |  |  |
+| `podUID` _string_ | podUID identifies the worker pod whose logs the cursor addresses. |  |  |
+| `lastTimestamp` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | lastTimestamp is the newest runtime timestamp the controller processed. |  | Optional: \{\} <br /> |
+| `supervisorDeathAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | supervisorDeathAt remains set until the worker pod is reaped. |  | Optional: \{\} <br /> |
+| `followDoneAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | followDoneAt is when pgcopydb logged that follow reached endpos. |  | Optional: \{\} <br /> |
 
 

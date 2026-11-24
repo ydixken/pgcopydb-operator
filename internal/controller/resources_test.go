@@ -48,7 +48,7 @@ import (
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
 	pgoutputPlugin           = "pgoutput"
-	patchedVersionForTest    = "0.18.157.g5fa0950"
+	patchedVersionForTest    = "0.18.159.g9d8b660"
 	featureRunOwner          = "run-owner"
 	extensionFixtureName     = "citext"
 	extensionBuiltin         = "plpgsql"
@@ -297,7 +297,7 @@ func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
 				build func() (*batchv1.Job, error)
 				want  bool
 			}{
-				"worker":         {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
+				jobKindWorker:    {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
 				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
 				jobKindGate:      {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
 				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},
@@ -512,8 +512,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.157.g5fa0950", "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.159.g9d8b660|0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -599,7 +599,7 @@ func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.157.g5fa0950", "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()
@@ -3093,7 +3093,7 @@ case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
   '\conninfo') printf 'Backend PID|4711\n4711\n' ;;
-  *server_version_num*) echo "${TGT_MAJOR-16}" ;;
+  *server_version_num*) case "$uri" in src*) echo "${SRC_MAJOR-16}" ;; *) echo "${TGT_MAJOR-16}" ;; esac ;;
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
   *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]'|'["extension citext (owner postgres, migration role limited)"]') echo 1 ;; *) echo -1 ;; esac ;;

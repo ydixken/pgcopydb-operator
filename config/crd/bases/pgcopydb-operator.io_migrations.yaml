@@ -2668,6 +2668,36 @@ spec:
                     format: date-time
                     type: string
                 type: object
+              workerLogCursor:
+                description: workerLogCursor stores the timestamped log position for
+                  the current follow worker.
+                properties:
+                  followDoneAt:
+                    description: followDoneAt is when pgcopydb logged that follow
+                      reached endpos.
+                    format: date-time
+                    type: string
+                  jobUID:
+                    description: jobUID identifies the worker attempt.
+                    type: string
+                  lastTimestamp:
+                    description: lastTimestamp is the newest runtime timestamp the
+                      controller processed.
+                    format: date-time
+                    type: string
+                  podUID:
+                    description: podUID identifies the worker pod whose logs the cursor
+                      addresses.
+                    type: string
+                  supervisorDeathAt:
+                    description: supervisorDeathAt remains set until the worker pod
+                      is reaped.
+                    format: date-time
+                    type: string
+                required:
+                - jobUID
+                - podUID
+                type: object
             type: object
         required:
         - spec
@@ -5324,6 +5354,36 @@ spec:
                   startedAt:
                     format: date-time
                     type: string
+                type: object
+              workerLogCursor:
+                description: workerLogCursor stores the timestamped log position for
+                  the current follow worker.
+                properties:
+                  followDoneAt:
+                    description: followDoneAt is when pgcopydb logged that follow
+                      reached endpos.
+                    format: date-time
+                    type: string
+                  jobUID:
+                    description: jobUID identifies the worker attempt.
+                    type: string
+                  lastTimestamp:
+                    description: lastTimestamp is the newest runtime timestamp the
+                      controller processed.
+                    format: date-time
+                    type: string
+                  podUID:
+                    description: podUID identifies the worker pod whose logs the cursor
+                      addresses.
+                    type: string
+                  supervisorDeathAt:
+                    description: supervisorDeathAt remains set until the worker pod
+                      is reaped.
+                    format: date-time
+                    type: string
+                required:
+                - jobUID
+                - podUID
                 type: object
             type: object
         required:

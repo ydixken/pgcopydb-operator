@@ -12,10 +12,10 @@ See [client tool versions](../../docs/reference/prerequisites.md#client-tool-ver
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`5fa095015df20f509a18ed81ee364ee95ea34ff5`](https://github.com/ydixken/pgcopydb/commit/5fa095015df20f509a18ed81ee364ee95ea34ff5).
-The version string is `0.18.157.g5fa0950`, derived from `git describe` (`v0.18-157-g5fa0950`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is one hundred and fifty-seven commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:9a144a22e9a7ee6c935ce1561d21afa6537e5628c32d5d184568c4c00dc9a833`, published by [builder run `45385782369`](https://github.com/ydixken/pgcopydb-operator/actions/runs/45385782369).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`9d8b660f412238f4c5c04d29ad40425e12ec57d5`](https://github.com/ydixken/pgcopydb/commit/9d8b660f412238f4c5c04d29ad40425e12ec57d5).
+The version string is `0.18.159.g9d8b660`, derived from `git describe` (`v0.18-159-g9d8b660`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is one hundred and fifty-nine commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:794a02a352f978353ca4288e6ec6c4625f4cd98e2195ce196e554a41d108c033`, published by [builder run `45419848794`](https://github.com/ydixken/pgcopydb-operator/actions/runs/45419848794).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -206,8 +206,16 @@ With one worker, the default, the behavior and the slot, origin and publication 
 The build canary fails when `pgcopydb clone --help` does not list `--wal-workers`.
 The PR head `145f09f`, whose tree the merge commit keeps, passed [Run Tests `45381889398`](https://github.com/ydixken/pgcopydb/actions/runs/45381889398) and [Nightly Tests `45381893767`](https://github.com/ydixken/pgcopydb/actions/runs/45381893767).
 
-The manager and chart allow `0.18.157.g5fa0950`, `0.18.144.g86bf908`, `0.18.136.gb42f560`, `0.18.132.gd4a2db1`, `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all twenty-one older versions so upgrading the operator does not suppress counters for existing workers.
+[Fork PR #45](https://github.com/ydixken/pgcopydb/pull/45), merged as `9d8b660`, makes the post-data restore of `pgcopydb clone --follow` skip the publications that pgcopydb creates on the source.
+These are the automatic publication, or the per-table publications `<slot>_t<oid>` with more than one WAL worker.
+Before, the restore copied them to the target, where nothing dropped them: the operator's release E2E found 18 `_t<oid>` publications on the target after the WAL workers spec.
+The dump step reads these publications in the same snapshot and records their archive entries, and post-data leaves out those entries.
+A publication that `--publication` names belongs to the user and is restored, as is every other publication of the source.
+The PR head `49c2be0`, whose tree the merge commit keeps, passed [Run Tests `45413891697`](https://github.com/ydixken/pgcopydb/actions/runs/45413891697) on its third attempt, after two runner gdb failures in `cdc-pgoutput-resume`, and [Nightly Tests `45413899274`](https://github.com/ydixken/pgcopydb/actions/runs/45413899274).
+
+The manager and chart allow `0.18.159.g9d8b660`, `0.18.157.g5fa0950`, `0.18.144.g86bf908`, `0.18.136.gb42f560`, `0.18.132.gd4a2db1`, `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all twenty-two older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.157.g5fa0950` has the #43 statement cache and the #44 WAL workers but not the #45 publication skip.
 Version `0.18.144.g86bf908` has the #40 compare progress lines but neither the #43 statement cache nor the #44 WAL workers.
 Version `0.18.136.gb42f560` has the #39 `--defer-indexes` option but not the #40 compare progress lines.
 Version `0.18.132.gd4a2db1` has the #38 constraint fix but not the #39 `--defer-indexes` option.

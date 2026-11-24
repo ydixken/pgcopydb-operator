@@ -172,6 +172,72 @@ func TestCloneDone(t *testing.T) {
 	}
 }
 
+func TestScanWorkerLogs_FindsMarkerPastFormerTailLimit(t *testing.T) {
+	const stamp = "2026-08-09T10:00:00.000000000Z "
+	raw := strings.Repeat(stamp+`{"error_severity":"INFO","message":"reported write_lsn 0/5000"}`+"\n", 1205) +
+		stamp + `{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+
+	scan, err := ScanWorkerLogs(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scan.CloneDone {
+		t.Fatal("scanner missed the clone marker after more than 1,000 log lines")
+	}
+	if scan.LastTimestamp == nil || scan.LastTimestamp.Format(time.RFC3339Nano) != "2026-08-09T10:00:00Z" {
+		t.Fatalf("last timestamp = %v, want the runtime timestamp", scan.LastTimestamp)
+	}
+}
+
+func TestScanWorkerLogs_PersistsFollowDoneTime(t *testing.T) {
+	markerAt := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	raw := markerAt.Format(time.RFC3339Nano) +
+		` {"error_severity":"INFO","message":"Follow mode is now done, reached endpos 1/76081A70"}` + "\n"
+
+	scan, err := ScanWorkerLogs(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.FollowDoneAt == nil || !scan.FollowDoneAt.Equal(markerAt) {
+		t.Fatalf("follow done time = %v, want %v", scan.FollowDoneAt, markerAt)
+	}
+}
+
+func TestScanWorkerLogs_DistinguishesWorkerAndSupervisor(t *testing.T) {
+	first := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	raw := first.Format(time.RFC3339Nano) +
+		` {"message":"Follow mode is now done, reached endpos 0/100"}` + "\n" +
+		first.Add(time.Second).Format(time.RFC3339Nano) +
+		` {"message":"Follow mode is now done, 2 WAL workers reached endpos 0/100, lowest replay_lsn is 0/100"}` + "\n"
+	scan, err := ScanWorkerLogs(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.FollowDoneAt == nil || !scan.FollowDoneAt.Equal(first) {
+		t.Fatalf("worker marker = %v, want %v", scan.FollowDoneAt, first)
+	}
+	if scan.AllWorkersDoneAt == nil || !scan.AllWorkersDoneAt.Equal(first.Add(time.Second)) {
+		t.Fatalf("supervisor marker = %v, want %v", scan.AllWorkersDoneAt, first.Add(time.Second))
+	}
+}
+
+func TestScanWorkerLogs_PersistsSupervisorDeathTime(t *testing.T) {
+	first := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	raw := first.Format(time.RFC3339Nano) + ` {"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}` + "\n" +
+		first.Add(time.Second).Format(time.RFC3339Nano) + ` {"error_severity":"INFO","message":"streamed up to write_lsn 0/5000"}` + "\n"
+
+	scan, err := ScanWorkerLogs(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.SupervisorDeathAt == nil || !scan.SupervisorDeathAt.Equal(first) {
+		t.Fatalf("supervisor death time = %v, want %v", scan.SupervisorDeathAt, first)
+	}
+	if scan.LastTimestamp == nil || !scan.LastTimestamp.Equal(first.Add(time.Second)) {
+		t.Fatalf("last timestamp = %v, want %v", scan.LastTimestamp, first.Add(time.Second))
+	}
+}
+
 func TestSupervisorDeath(t *testing.T) {
 	// Line shapes as PodLogOptions Timestamps returns them: the runtime's
 	// RFC3339Nano stamp, a space, then pgcopydb's JSON log line. The marker

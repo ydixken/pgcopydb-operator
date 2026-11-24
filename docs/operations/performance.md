@@ -142,7 +142,7 @@ Rehearse catch-up with the intended workload and the intended number of workers.
 #### What we measured with WAL workers
 
 We measured a build of fork commit `ff7b023` (`0.18.155.gff7b023`) on 2026-11-23 and 2026-11-24, on one 14-CPU machine under podman.
-Apart from tests, its code is the same as the bundled `0.18.157.g5fa0950`.
+Apart from tests, its code is the same as `0.18.157.g5fa0950`.
 Source and target ran PostgreSQL 18.7, with CPU quotas of 4 for the source, 2 for the target, and 8 for pgcopydb and pgbench.
 The workload has 32 table units of 100,000 rows: 4 hot tables, foreign-key pairs, tables without a key, a partitioned family, and an idle table.
 pgbench wrote a backlog of 1.28 million transactions while no worker ran, then pgcopydb drained it to endpos.

@@ -120,7 +120,13 @@ func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Mi
 // worker Job runs. The sample is best effort: no sample keeps the previous
 // status. Until cloneDone (see confirmBaseCopy) the stream is only reported,
 // never acted on.
-func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string, cloneDone bool) {
+func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string, cloneDone, followDone bool) {
+	if cloneDone && followDone {
+		r.setCondition(m, v1beta1.ConditionStreaming, metav1.ConditionFalse, reasonFollowDone,
+			"pgcopydb reached endpos and is completing post-drain work")
+		m.Status.Phase = v1beta1.PhaseCuttingOver
+		return
+	}
 	log := logf.FromContext(ctx)
 	if r.Sentinel == nil {
 		return
@@ -243,9 +249,11 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // instead (see buildVerifyJob). A refuted drain or a failed handover fails the
 // Migration with the slot intact, at the cost of WAL retention on the source.
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
-	// A refused marker stays refused (see confirmBaseCopy): the worker exiting
-	// 0 is the same word the marker was, and the verify Job decides by content.
-	if !tablesEmptySeen(m) {
+	r.clearCutoverStalled(m, reasonFollowWorkerExited,
+		"the follow worker exited; drain verification decides whether cutover is safe")
+	// A marker awaiting a sample stays unconfirmed: the worker exiting 0 is
+	// not that sample. The verify Job still decides whether the drain is complete.
+	if !tablesEmptySeen(m) && !cloneMarkerSeen(m) {
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
 	}
 	m.Status.Phase = v1beta1.PhaseCuttingOver

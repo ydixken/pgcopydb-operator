@@ -17,6 +17,7 @@ limitations under the License.
 package buildconfig
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,11 @@ import (
 	"testing"
 )
 
-const runnerClientSelector = "../../images/runner/client-selector.sh"
+const (
+	runnerClientSelector = "../../images/runner/client-selector.sh"
+	targetPGURI          = "PGCOPYDB_TARGET_PGURI"
+	targetMajor          = "TARGET_MAJOR"
+)
 
 func TestRunnerClientSelector(t *testing.T) {
 	sh, err := exec.LookPath("sh")
@@ -87,8 +92,8 @@ pg_restore --version
 			"PGCOPYDB_TOOLS_ROOT":   toolsRoot,
 			"PGCOPYDB_CLIENT_CACHE": cache,
 			"PGCOPYDB_REAL_BINARY":  realPgcopydb,
-			"PGCOPYDB_TARGET_PGURI": "postgresql://user@target/database",
-			"TARGET_MAJOR":          "16",
+			targetPGURI:             "postgresql://user@target/database",
+			targetMajor:             "16",
 			"PSQL_CALL_LOG":         callLog,
 			"PGCOPYDB_CLIENT_MAJOR": "",
 			"FAIL_PSQL":             "",
@@ -107,7 +112,7 @@ pg_restore --version
 	}
 
 	t.Run("target major selects and caches matching tools", func(t *testing.T) {
-		out := run(t, "pgcopydb", map[string]string{"TARGET_MAJOR": "16"}, true, "client16-pg_dump")
+		out := run(t, "pgcopydb", map[string]string{targetMajor: "16"}, true, "client16-pg_dump")
 		if !strings.Contains(out, "client16-pg_restore") {
 			t.Fatalf("pgcopydb did not use PostgreSQL 16 pg_restore:\n%s", out)
 		}
@@ -117,7 +122,7 @@ pg_restore --version
 
 		// Once selected, later commands in the same pod must use that choice
 		// rather than querying the target again.
-		run(t, "pg_restore", map[string]string{"TARGET_MAJOR": "18"}, true, "client16-pg_restore")
+		run(t, "pg_restore", map[string]string{targetMajor: "18"}, true, "client16-pg_restore")
 		if got, err := os.ReadFile(callLog); err != nil || string(got) != "called\n" {
 			t.Fatalf("psql calls=%q err=%v, want one call before cache reuse", got, err)
 		}
@@ -127,7 +132,7 @@ pg_restore --version
 		if err := os.Remove(cache); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		run(t, "pg_dump", map[string]string{"PGCOPYDB_TARGET_PGURI": ""}, true, "client18-pg_dump")
+		run(t, "pg_dump", map[string]string{targetPGURI: ""}, true, "client18-pg_dump")
 
 		if err := os.WriteFile(cache, []byte("16\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -139,13 +144,13 @@ pg_restore --version
 		if err := os.Remove(cache); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		run(t, "pg_dump", map[string]string{"TARGET_MAJOR": "unknown"}, false,
+		run(t, "pg_dump", map[string]string{targetMajor: "unknown"}, false,
 			"runner client selector: target PostgreSQL major is not numeric")
 
 		const secretURI = "postgresql://alice:secret-password@target/database"
 		out := run(t, "pg_dump", map[string]string{
-			"PGCOPYDB_TARGET_PGURI": secretURI,
-			"FAIL_PSQL":             "1",
+			targetPGURI: secretURI,
+			"FAIL_PSQL": "1",
 		}, false, "runner client selector: cannot read the target PostgreSQL major version")
 		if strings.Contains(out, secretURI) || strings.Contains(out, "secret-password") {
 			t.Fatalf("selector leaked target credentials:\n%s", out)
@@ -155,12 +160,8 @@ pg_restore --version
 
 func runnerSelectorEnv(base []string, defaults, overrides map[string]string) []string {
 	values := make(map[string]string, len(defaults)+len(overrides))
-	for key, value := range defaults {
-		values[key] = value
-	}
-	for key, value := range overrides {
-		values[key] = value
-	}
+	maps.Copy(values, defaults)
+	maps.Copy(values, overrides)
 	env := make([]string, 0, len(base)+len(values))
 	for _, entry := range base {
 		key, _, ok := strings.Cut(entry, "=")
