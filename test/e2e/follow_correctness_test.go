@@ -24,6 +24,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -43,7 +45,69 @@ var _ = Describe("Follow correctness", SpecPriority(1), func() {
 	It("applies source transactions that overlap, the last one before endpos included", overlappingTransactions)
 	It("applies a large transaction once after a walsender restart sends it again", resentTransaction)
 	It("applies a transaction again after its COMMIT failed on the target", failedCommitRetried)
+	It("reports a blocked sequence reset without stopping the follow worker", stalledSequenceReset)
 })
+
+func stalledSequenceReset() {
+	c := followCorrectnessCase("stall_seq",
+		"CREATE SEQUENCE ${schema}.stall_seq; CREATE TABLE ${schema}.t (id int PRIMARY KEY);\n"+
+			"INSERT INTO ${schema}.t VALUES (1);\n")
+	m, identity, captured := startFollowCorrectness("e2e-stall-seq-", c)
+	sequence := c.schemaNames(identity)[0] + ".stall_seq"
+	psql(sourceCluster, asSourceAppRole()+"SELECT nextval('"+sequence+"')")
+
+	By("holding the target sequence while the worker finishes its follow")
+	const session = "e2e_follow_seq_hold"
+	release := holdOnTargetFor(session, "ALTER SEQUENCE "+sequence+" INCREMENT BY 1",
+		"SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"+
+			" WHERE a.application_name = '"+session+"' AND l.relation = '"+sequence+"'::regclass AND l.granted",
+		40*time.Minute)
+	approveCutover(m.Name)
+
+	By("waiting for pgcopydb to block on the sequence reset")
+	Eventually(func(g Gomega) {
+		current := &v1beta1.Migration{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), current)).To(Succeed())
+		if current.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying("migration failed before the sequence reset: " + failureMessage(current)).Now()
+		}
+		g.Expect(current.Status.WorkerLogCursor).NotTo(BeNil())
+		g.Expect(current.Status.WorkerLogCursor.FollowDoneAt).NotTo(BeNil())
+		g.Expect(psql(targetCluster, "SELECT count(*) FROM pg_stat_activity a"+
+			" JOIN pg_stat_activity h ON h.pid = ANY(pg_blocking_pids(a.pid))"+
+			" WHERE h.application_name = '"+session+"' AND a.query ILIKE '%setval%'")).To(Equal("1"))
+	}, 10*time.Minute, 2*time.Second).Should(Succeed())
+
+	By("reporting the stall after 15 minutes without completing or restarting the worker")
+	Eventually(func(g Gomega) {
+		current := &v1beta1.Migration{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), current)).To(Succeed())
+		if current.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying("migration failed while the sequence was blocked: " + failureMessage(current)).Now()
+		}
+		g.Expect(current.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		g.Expect(current.Status.Attempts).To(Equal(int32(1)))
+		g.Expect(current.Status.WorkerLogCursor).NotTo(BeNil())
+		g.Expect(current.Status.WorkerLogCursor.FollowDoneAt).NotTo(BeNil())
+		stalled := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.ConditionCutoverStalled)
+		g.Expect(stalled).NotTo(BeNil())
+		g.Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
+		g.Expect(stalled.LastTransitionTime.Time.Before(current.Status.WorkerLogCursor.FollowDoneAt.Add(15 * time.Minute))).To(BeFalse())
+		g.Expect(apimeta.IsStatusConditionTrue(current.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeFalse())
+	}, 20*time.Minute, 5*time.Second).Should(Succeed())
+
+	By("releasing the sequence and completing the migration")
+	release()
+	completed := waitCompletedCapturing(m, captured)
+	stalled := apimeta.FindStatusCondition(completed.Status.Conditions, v1beta1.ConditionCutoverStalled)
+	Expect(stalled).NotTo(BeNil())
+	Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
+	Expect(stalled.Reason).To(Equal("FollowWorkerExited"))
+	expectConditionTrue(completed, v1beta1.ConditionCutoverComplete)
+	Expect(psql(targetCluster, "SELECT last_value FROM "+sequence)).
+		To(Equal(psql(sourceCluster, "SELECT last_value FROM "+sequence)))
+	expectCoverageIdentical([]coverageCase{c}, identity, completed)
+}
 
 func overlappingTransactions() {
 	c := followCorrectnessCase("overlap",
@@ -245,8 +309,12 @@ func holdTargetLock(table string) func() {
 // The returned release terminates that session, which frees the lock, and waits for its psql to exit.
 // The spec's cleanup calls release as well, before the stamped schemas are dropped.
 func holdOnTarget(session, lock, held string) func() {
+	return holdOnTargetFor(session, lock, held, 20*time.Minute)
+}
+
+func holdOnTargetFor(session, lock, held string, hold time.Duration) func() {
 	GinkgoHelper()
-	done := startPSQLScript(targetCluster, holdSQL(session, lock), 25*time.Minute)
+	done := startPSQLScript(targetCluster, holdSQLFor(session, lock, hold), hold+5*time.Minute)
 	holding := true
 	release := func() {
 		if !holding {
@@ -272,7 +340,11 @@ func holdOnTarget(session, lock, held string) func() {
 // holdSQL keeps lock in an open transaction of a session named session for up
 // to 20 minutes; endSessionSQL ends it sooner.
 func holdSQL(session, lock string) string {
-	return "SET application_name = '" + session + "';\nBEGIN;\n" + lock + ";\nSELECT pg_sleep(1200);\n"
+	return holdSQLFor(session, lock, 20*time.Minute)
+}
+
+func holdSQLFor(session, lock string, hold time.Duration) string {
+	return fmt.Sprintf("SET application_name = '%s';\nBEGIN;\n%s;\nSELECT pg_sleep(%d);\n", session, lock, int(hold.Seconds()))
 }
 
 // endSessionSQL ends every session named session and prints how many it ended.
