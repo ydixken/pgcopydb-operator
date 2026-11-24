@@ -74,8 +74,9 @@ Zero on both counts is the unknown answer, not the tail, so the phase stays wher
 
 We named each type for what `True` means.
 Eight are normal-true: True is the desired state.
-Three are abnormal-true: True reports a problem.
-`Failed` means the migration ended in failure, while `CommitsBlocked` and `RetryHeld` report a wait that clears once its cause is gone.
+Four are abnormal-true: True reports a problem.
+`Failed` means the migration ended in failure.
+`CommitsBlocked`, `RetryHeld`, and `CutoverStalled` report a wait that clears once its cause is gone.
 
 | Type | Polarity | True means |
 |---|---|---|
@@ -84,6 +85,7 @@ Three are abnormal-true: True reports a problem.
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
 | `CaughtUp` | normal-true | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CutoverCompleted` | normal-true | The drain is proven: a clean data compare, or origin progress exactly at the cutover LSN on the rare cutover where the two coincide. With `clone.ownerAfterRestore` set, the handover finished first. |
+| `CutoverStalled` | abnormal-true | pgcopydb reached endpos, but the follow worker did not exit within 15 minutes. |
 | `OwnershipApplied` | normal-true | The restored objects belong to `clone.ownerAfterRestore`. The condition is present only when the spec sets that field. |
 | `Verified` | normal-true | Every requested `pgcopydb compare` found source and target matching. |
 | `Complete` | normal-true | The migration finished. Terminal and absorbing. |
@@ -103,7 +105,7 @@ This table lists every reason that the controller sets, spelled exactly as it ap
 | `Validated` | `False` | `PreflightFailed` | A preflight test failed. The failed test can be connectivity, a PgBouncer in the source or target connection, the `synchronousCommit` test, or selected extension availability or ownership. It can also be a target clone privilege, a source table that row-level security would filter, or an all-databases superuser or database-listing probe. Or it can be a follow prerequisite, including unlogged tables in scope. The message names the failed test and the recovery action. A `superuserSecretRef` hint applies only to grant remediation. When the preflight log stays unreadable for two minutes after the Job fails, the message carries the read error and the Job name instead. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe saw copy, index or vacuum workers of this attempt connected to the target. This reason replaces `CloneRunning` for the rest of the attempt. The phase cannot reach `Finalizing` before the controller sets this reason. |
-| `CloneCompleted` | `False` | `CloneMarkerSeen` | Live migration: pgcopydb logged that the base copy finished, but the confirming database sample is not yet available. The reason remains until a sample confirms the copy. |
+| `CloneCompleted` | `False` | `CloneMarkerSeen` | Live migration: pgcopydb logged that the base copy finished, but a fresh database sample is not yet available. The reason remains until a sample shows that the copy finished. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed. The message carries the Job failure and the last pgcopydb error line. |
 | `CloneCompleted` | `False` | `SnapshotLost` | Live migration with `spec.clone.dropIfExists`: pgcopydb refused to resume the copy without the replication slot's snapshot. Thus the next attempt starts from the beginning. The message carries the refusal. The next attempt's `CloneRunning` replaces it. |
 | `CloneCompleted` | `False` | `TablesEmptyOnTarget` | Live migration: the worker logged that the base copy finished. But the pass's own sample found tables that hold rows on the source and none on the target. A `--resume` after killed attempts can produce this. The message names them. A table that `clone.filters.excludeTableData` names exactly, or a `SchemaOnly` table, does not count. The controller does not trust the marker, and it reports the stream but does not drive it. The reason stands until a sample finds a row in each of these tables. |
@@ -111,12 +113,17 @@ This table lists every reason that the controller sets, spelled exactly as it ap
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished, and pgcopydb's catalog, where it could be read, counted every table done. |
 | `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the worker logged that the base copy finished. The pass's own sample found no table that holds rows on the source and none on the target. The tables that `TablesEmptyOnTarget` does not count do not count here either. Change replay also took control. |
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
+| `Streaming` | `False` | `FollowDone` | pgcopydb reached endpos and is completing post-drain sequence synchronization. |
 | `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
 | `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator needs a second consecutive one before it sets `CaughtUp` True. A single sample can land while the worker still acknowledges its raw receive position. At that point, the lag reads near zero, whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging`, and the count restarts. |
 | `CutoverCompleted` | `Unknown` | `RehearsalPodRemains` | The worker drained, and the drain verify waits until the pod of a canceled verification rehearsal ends. The message names the pod and its node. The controller deletes the condition after the pod ends, and the result of the verify then sets it. |
-| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. For any other reading, the verify decides by content. Nearly every cutover takes this path, because publication-filtered WAL and unapplied commits measure alike. Changes are applied and sequences are synced. |
+| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. For any other reading, the verify decides by content. Nearly every cutover takes this path, because publication-filtered WAL and unapplied commits measure alike. The worker applies changes and syncs sequences. |
 | `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change: `pgcopydb compare data` found a difference or gave no verdict. The Migration fails with the same reason. |
+| `CutoverStalled` | `True` | `FollowWorkerNotExited` | pgcopydb logged that follow reached endpos, but the worker stayed active for 15 minutes. See [CutoverStalled is True](../troubleshooting.md#cutoverstalled-is-true). |
+| `CutoverStalled` | `False` | `FollowWorkerExited` | A stalled follow worker exited. The drain verification now decides whether cutover is safe. |
+| `CutoverStalled` | `False` | `FollowWorkerRestarted` | A new follow worker attempt or pod replaced the worker that reached endpos. |
+| `CutoverStalled` | `False` | `FollowWorkerSuspended` | `spec.suspend` stopped the worker. |
 | `OwnershipApplied` | `Unknown` | `OwnershipRunning` | The `<name>-reown` Job is running: after the worker exited on a clone, after the drain is proven on a live migration. No worker restarts while it exists. |
 | `OwnershipApplied` | `Unknown` | `OwnershipSuspended` | `spec.suspend` deleted a running handover Job. The Job runs again on resume and runs the statements that remain. Each `ALTER` commits on its own. |
 | `OwnershipApplied` | `True` | `OwnershipApplied` | Every schema, relation, routine and type the migration role owned in the target database now belongs to `clone.ownerAfterRestore`. |
@@ -182,6 +189,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `SnapshotLost` | Warning | pgcopydb refused to resume a live migration's copy. With `spec.clone.dropIfExists` (action `Retry`), a retry waits for the retry gate. Then it drops the slot and starts from the beginning with `--restart --drop-if-exists`. If no retry budget remains, a retry follows only when the gate exempts the failed attempt. Without `dropIfExists`, this is the terminal failure event (action `Fail`), and no attempt follows. |
 | `TablesEmptyOnTarget` | Warning | The worker logged that the base copy finished, while a sample showed tables that hold rows on the source and none on the target. The message names them. The event occurs once per refusal. See the condition reason of the same name. |
 | `CommitsBlocked` | Warning | `CommitsBlocked` turned `True` (action `Sample`): once on each entry into `True`, with the condition's message. |
+| `CutoverStalled` | Warning | `CutoverStalled` turned `True` (action `ObserveFollow`): once on each entry into `True`. |
 | `RetryHeld` | Warning | The retry gate holds the next attempt (action `Retry`): when a hold gets its first result, and whenever its reason changes. `GateProbing` emits none, because every retry passes through it. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died, but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect). The operator deleted the pod so that the normal retry could run. |
 | `PreflightStarted` | Normal | The controller created the preflight Job. |

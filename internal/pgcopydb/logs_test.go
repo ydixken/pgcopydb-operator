@@ -189,6 +189,20 @@ func TestScanWorkerLogs_FindsMarkerPastFormerTailLimit(t *testing.T) {
 	}
 }
 
+func TestScanWorkerLogs_PersistsFollowDoneTime(t *testing.T) {
+	markerAt := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	raw := markerAt.Format(time.RFC3339Nano) +
+		` {"error_severity":"INFO","message":"Follow mode is now done, reached endpos 1/76081A70"}` + "\n"
+
+	scan, err := ScanWorkerLogs(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.FollowDoneAt == nil || !scan.FollowDoneAt.Equal(markerAt) {
+		t.Fatalf("follow done time = %v, want %v", scan.FollowDoneAt, markerAt)
+	}
+}
+
 func TestScanWorkerLogs_PersistsSupervisorDeathTime(t *testing.T) {
 	first := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
 	raw := first.Format(time.RFC3339Nano) + ` {"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}` + "\n" +

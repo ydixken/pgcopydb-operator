@@ -235,11 +235,14 @@ func CloneDone(raw []byte) bool {
 		bytes.Contains(raw, []byte(markerAllStepsDone))
 }
 
+const markerFollowDone = "Follow mode is now done, reached endpos"
+
 // WorkerLogScan summarizes a timestamped log stream without retaining its body.
 type WorkerLogScan struct {
 	LastTimestamp     *time.Time
 	CloneDone         bool
 	SupervisorDeathAt *time.Time
+	FollowDoneAt      *time.Time
 }
 
 // ScanWorkerLogs scans timestamped pod logs and returns the markers and newest
@@ -264,6 +267,9 @@ func ScanWorkerLogs(raw io.Reader) (WorkerLogScan, error) {
 					}
 					if scan.SupervisorDeathAt == nil && supervisorDeathLine(line) {
 						scan.SupervisorDeathAt = &timestamp
+					}
+					if scan.FollowDoneAt == nil && strings.Contains(line, markerFollowDone) {
+						scan.FollowDoneAt = &timestamp
 					}
 				}
 			}

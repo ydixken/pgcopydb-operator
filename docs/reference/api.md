@@ -639,5 +639,6 @@ _Appears in:_
 | `podUID` _string_ | podUID identifies the worker pod whose logs the cursor addresses. |  |  |
 | `lastTimestamp` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | lastTimestamp is the newest runtime timestamp the controller processed. |  | Optional: \{\} <br /> |
 | `supervisorDeathAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | supervisorDeathAt remains set until the worker pod is reaped. |  | Optional: \{\} <br /> |
+| `followDoneAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | followDoneAt is when pgcopydb logged that follow reached endpos. |  | Optional: \{\} <br /> |
 
 

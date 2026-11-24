@@ -71,6 +71,9 @@ const (
 	// failedLogGrace is how long after a preflight or worker Job fails a log
 	// read error is retried: the verdict or terminal cause is only in that log.
 	failedLogGrace = 2 * time.Minute
+	// followWorkerExitGrace bounds the time between pgcopydb reaching endpos
+	// and the worker exiting its post-drain sequence work.
+	followWorkerExitGrace = 15 * time.Minute
 	// preflightOkLogTail is the whole preflight log, a number only because the
 	// API wants one: a missed remediated: line loses a grant's audit event.
 	preflightOkLogTail = 10000
@@ -92,6 +95,11 @@ const (
 	reasonCopyingData         = "CopyingData"
 	reasonCloneMarkerSeen     = "CloneMarkerSeen"
 	reasonTablesEmptyOnTarget = "TablesEmptyOnTarget"
+	reasonFollowDone          = "FollowDone"
+	reasonFollowWorkerStalled = "FollowWorkerNotExited"
+	reasonFollowWorkerExited  = "FollowWorkerExited"
+	reasonFollowWorkerRestart = "FollowWorkerRestarted"
+	reasonFollowWorkerSuspend = "FollowWorkerSuspended"
 )
 
 // reasonCloneIncomplete fails a plain clone whose worker exited 0 while
@@ -581,7 +589,13 @@ func (r *MigrationReconciler) observeRunningJob(
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
 		// trigger the cutover itself; see follow.go.
 		started = r.currentTime()
-		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
+		followDone := false
+		if cursor := m.Status.WorkerLogCursor; cursor != nil &&
+			cursor.JobUID == string(job.UID) && cursor.FollowDoneAt != nil {
+			followDone = true
+		}
+		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone, followDone)
+		r.reconcileCutoverStalled(m, job, followDone)
 		record("follow_control", started)
 		// After the follow step, which may have started the cutover this pass. Best
 		// effort like the sample: a failed step must not stop the worker's observation.
@@ -800,6 +814,7 @@ func (r *MigrationReconciler) scanWorkerLogs(ctx context.Context, m *v1beta1.Mig
 	if previous != nil && previous.JobUID == string(job.UID) && previous.PodUID == string(podUID) {
 		cursor.LastTimestamp = previous.LastTimestamp
 		cursor.SupervisorDeathAt = previous.SupervisorDeathAt
+		cursor.FollowDoneAt = previous.FollowDoneAt
 	}
 	if scan.LastTimestamp != nil && (cursor.LastTimestamp == nil || scan.LastTimestamp.After(cursor.LastTimestamp.Time)) {
 		cursor.LastTimestamp = &metav1.Time{Time: *scan.LastTimestamp}
@@ -807,8 +822,39 @@ func (r *MigrationReconciler) scanWorkerLogs(ctx context.Context, m *v1beta1.Mig
 	if cursor.SupervisorDeathAt == nil && scan.SupervisorDeathAt != nil {
 		cursor.SupervisorDeathAt = &metav1.Time{Time: *scan.SupervisorDeathAt}
 	}
+	if previous != nil && previous.JobUID == string(job.UID) &&
+		previous.PodUID != string(podUID) {
+		r.clearCutoverStalled(m, reasonFollowWorkerRestart,
+			"the follow worker pod changed; waiting for its endpos marker")
+	}
+	if cursor.FollowDoneAt == nil && scan.FollowDoneAt != nil {
+		cursor.FollowDoneAt = &metav1.Time{Time: *scan.FollowDoneAt}
+	}
 	m.Status.WorkerLogCursor = cursor
 	return scan, nil
+}
+
+func (r *MigrationReconciler) reconcileCutoverStalled(m *v1beta1.Migration, job *batchv1.Job, followDone bool) {
+	cursor := m.Status.WorkerLogCursor
+	if !followDone || cursor == nil || cursor.JobUID != string(job.UID) || cursor.FollowDoneAt == nil {
+		r.clearCutoverStalled(m, reasonFollowWorkerRestart,
+			"the follow worker restarted before the endpos marker")
+		return
+	}
+	if r.currentTime().Before(cursor.FollowDoneAt.Time.Add(followWorkerExitGrace)) {
+		return
+	}
+	message := "pgcopydb reached endpos, but the follow worker has not exited after 15 minutes; inspect the worker logs and database activity"
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled) {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, v1beta1.ConditionCutoverStalled, "ObserveFollow", "%s", message)
+	}
+	r.setCondition(m, v1beta1.ConditionCutoverStalled, metav1.ConditionTrue, reasonFollowWorkerStalled, message)
+}
+
+func (r *MigrationReconciler) clearCutoverStalled(m *v1beta1.Migration, reason, message string) {
+	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverStalled) {
+		r.setCondition(m, v1beta1.ConditionCutoverStalled, metav1.ConditionFalse, reason, message)
+	}
 }
 
 // reapZombieWorker deletes a worker pod pgcopydb 0.18 leaves alive: the
@@ -922,6 +968,7 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 	if err := r.deleteGateJob(ctx, m, next); err != nil {
 		return ctrl.Result{}, err
 	}
+	r.clearCutoverStalled(m, reasonFollowWorkerSuspend, "the Migration is suspended; the worker is stopped")
 	r.endHold(m, reasonHoldSuspended, fmt.Sprintf("Attempt %d waits for a resume: spec.suspend stopped the retry gate", next))
 	m.Status.Phase = v1beta1.PhaseSuspended
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
@@ -1029,6 +1076,7 @@ func (r *MigrationReconciler) recordAttempt(ctx context.Context, m, base *v1beta
 	m.Status.JobName = job.Name
 	m.Status.WorkerLogCursor = nil
 	m.Status.Phase = attemptPhase(m)
+	r.clearCutoverStalled(m, reasonFollowWorkerRestart, "a new worker attempt started")
 	// A finished base copy does not un-happen when the worker is restarted;
 	// only a copy still owed gets the fresh attempt's reason, which is also
 	// what clears the Finalizing latch (see copySeen).
@@ -1077,6 +1125,7 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 	if err := r.cancelRehearsal(ctx, m, fmt.Sprintf("worker attempt %d failed", m.Status.Attempts)); err != nil {
 		return ctrl.Result{}, err
 	}
+	r.clearCutoverStalled(m, reasonFollowWorkerExited, "the follow worker exited; the retry or verification path will decide the outcome")
 	reason := failureReason(job)
 	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, workerLogTail)
 	switch {

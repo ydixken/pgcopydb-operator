@@ -822,8 +822,7 @@ const (
 )
 
 // Condition type constants. Each is named for what True means: the first eight
-// are normal-true; ConditionFailed, ConditionCommitsBlocked and ConditionRetryHeld
-// are abnormal-true.
+// are normal-true; the rest are abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -833,6 +832,7 @@ const (
 	ConditionOwnershipApplied = "OwnershipApplied"
 	ConditionVerified         = "Verified"
 	ConditionComplete         = "Complete"
+	ConditionCutoverStalled   = "CutoverStalled"
 	ConditionFailed           = "Failed"
 	ConditionCommitsBlocked   = "CommitsBlocked"
 	ConditionRetryHeld        = "RetryHeld"
@@ -970,6 +970,9 @@ type WorkerLogCursor struct {
 	// supervisorDeathAt remains set until the worker pod is reaped.
 	// +optional
 	SupervisorDeathAt *metav1.Time `json:"supervisorDeathAt,omitempty"`
+	// followDoneAt is when pgcopydb logged that follow reached endpos.
+	// +optional
+	FollowDoneAt *metav1.Time `json:"followDoneAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

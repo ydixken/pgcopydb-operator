@@ -2608,6 +2608,11 @@ spec:
                 description: workerLogCursor stores the timestamped log position for
                   the current follow worker.
                 properties:
+                  followDoneAt:
+                    description: followDoneAt is when pgcopydb logged that follow
+                      reached endpos.
+                    format: date-time
+                    type: string
                   jobUID:
                     description: jobUID identifies the worker attempt.
                     type: string
@@ -5221,6 +5226,11 @@ spec:
                 description: workerLogCursor stores the timestamped log position for
                   the current follow worker.
                 properties:
+                  followDoneAt:
+                    description: followDoneAt is when pgcopydb logged that follow
+                      reached endpos.
+                    format: date-time
+                    type: string
                   jobUID:
                     description: jobUID identifies the worker attempt.
                     type: string
