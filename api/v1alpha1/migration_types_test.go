@@ -61,6 +61,7 @@ func fullMigration() *Migration {
 	sc := "fast-ssd"
 	ttl := int32(600)
 	lagBytes := int64(1234)
+	workerLag := int64(99)
 	// Fixed so two fullMigration() calls compare equal.
 	now := metav1.NewTime(time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC))
 	return &Migration{
@@ -107,6 +108,8 @@ func fullMigration() *Migration {
 				Publication: "pub", Wal2jsonNumericAsString: true,
 				ReplayNoOpUpdates:           true,
 				ApplyGroupTransactions:      50,
+				WalWorkers:                  2,
+				HighTrafficTables:           []string{"public.hot"},
 				AllowMissingReplicaIdentity: []string{"public.log"},
 				MaxCatchupLag:               &lag,
 			},
@@ -158,6 +161,7 @@ func fullMigration() *Migration {
 			Replication: &ReplicationStatus{
 				SlotName: "slot_1", WriteLSN: "0/20", ReplayLSN: "0/10",
 				Endpos: "0/30", LagBytes: &lagBytes,
+				Workers: []ReplicationWorkerStatus{{SlotName: "slot_1_w1", ReplayLSN: "0/10", LagBytes: &workerLag}},
 			},
 			Verification: []VerificationResult{{Check: "data", Passed: true, StartedAt: &now, CompletedAt: &now}},
 			VerificationRehearsal: &VerificationRehearsalStatus{
@@ -200,7 +204,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 		&m.Spec.Source, m.Spec.Source.TLS, &m.Spec.Clone, m.Spec.Clone.Filters,
 		m.Spec.Follow, &m.Spec.Cutover, m.Spec.Verification,
 		&m.Spec.WorkVolume, &m.Spec.Runner,
-		m.Status.Progress, m.Status.Replication, m.Status.RetryGate, m.Status.VerificationRehearsal,
+		m.Status.Progress, m.Status.Replication, &m.Status.Replication.Workers[0], m.Status.RetryGate, m.Status.VerificationRehearsal,
 		&m.Status.Verification[0], &m.Status.VerificationProgress[0], &m.Status.VerificationProgress[0].InFlight[0],
 	}
 	for _, obj := range objs {
@@ -232,6 +236,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	c.Spec.Clone.Filters.ExcludeTables[0] = mutated
 	*c.Spec.Clone.SplitTablesLargerThan = resource.MustParse("9Gi")
 	c.Spec.Follow.AllowMissingReplicaIdentity[0] = mutated
+	c.Spec.Follow.HighTrafficTables[0] = mutated
 	*c.Spec.Follow.MaxCatchupLag = resource.MustParse("9Gi")
 	c.Spec.Runner.NodeSelector["zone"] = mutated
 	c.Spec.Runner.Tolerations[0].Key = mutated
@@ -240,6 +245,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	*c.Status.Progress.BytesDone = resource.MustParse("9Gi")
 	c.Status.Progress.ObservedAt.Time = time.Unix(1, 0)
 	*c.Status.Replication.LagBytes = 9
+	*c.Status.Replication.Workers[0].LagBytes = 9
 	c.Status.RetryGate.Failure = mutated
 	c.Status.RetryGate.FailedAt.Time = time.Unix(1, 0)
 	c.Status.Verification[0].CompletedAt.Time = time.Unix(1, 0)

@@ -5,7 +5,7 @@ Read the keywords MUST, SHOULD, and MAY as RFC 2119 describes them.
 
 This page covers the base clone (`pgcopydb clone`), the whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 The ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/).
-For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/86bf908adca02d87063849dae775a02c1659c829).
+For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/5fa095015df20f509a18ed81ee364ee95ea34ff5).
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record the scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot check.
 
@@ -14,21 +14,22 @@ Use the [Planning checklist](../planning.md) to record the scope, operational, c
 Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuser on both sides.
 See [All databases](#all-databases).
 
-| Requirement                                             | Where  | Needed for       |
-|---------------------------------------------------------|--------|------------------|
-| No PgBouncer between the runner and either endpoint     | both   | every migration  |
-| SELECT on copied tables and sequences, USAGE on schemas | source | every migration  |
-| CREATE on the database, ownership alignment             | target | every migration  |
-| `wal_level = logical`                                   | source | follow           |
-| Free replication slot and WAL sender                    | source | follow           |
-| `REPLICATION` role attribute                            | source | follow           |
-| CREATE on the database plus table ownership (publication) | source | follow         |
-| EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
-| Primary key or replica identity on replicated tables    | source | follow           |
-| No row-level security that filters the migration role  | source | single-database migrations |
-| No unlogged tables in scope                             | source | follow           |
-| `TEMPORARY` on the database (`PUBLIC` holds it by default) | target | retries        |
-| A migration role no other Migration shares on the target database | target | every migration |
+| Requirement                                                         | Where  | Needed for                 |
+|---------------------------------------------------------------------|--------|----------------------------|
+| No PgBouncer between the runner and either endpoint                 | both   | every migration            |
+| SELECT on copied tables and sequences, USAGE on schemas             | source | every migration            |
+| CREATE on the database, ownership alignment                         | target | every migration            |
+| `wal_level = logical`                                               | source | follow                     |
+| Free replication slot and WAL sender                                | source | follow                     |
+| N slots, N + 1 WAL senders, N origins ([WAL workers](#wal-workers)) | both   | `walWorkers` N above 1     |
+| `REPLICATION` role attribute                                        | source | follow                     |
+| CREATE on the database plus table ownership (publication)           | source | follow                     |
+| EXECUTE on `pg_replication_origin_*` functions                      | target | follow                     |
+| Primary key or replica identity on replicated tables                | source | follow                     |
+| No row-level security that filters the migration role               | source | single-database migrations |
+| No unlogged tables in scope                                         | source | follow                     |
+| `TEMPORARY` on the database (`PUBLIC` holds it by default)          | target | retries                    |
+| A migration role no other Migration shares on the target database   | target | every migration            |
 
 ## Kubernetes
 
@@ -71,9 +72,13 @@ The check matches that description, not only the flag name, because another pgco
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twenty-one pgcopydb versions, with different guarantees.
+The progress poll supports twenty-two pgcopydb versions, with different guarantees.
 
-The bundled runner, `0.18.144.g86bf908`, added the compare progress lines.
+The bundled runner, `0.18.157.g5fa0950`, added [WAL workers](#wal-workers) ([fork PR #44](https://github.com/ydixken/pgcopydb/pull/44)).
+With `0.18.144.g86bf908` and older runners, preflight refuses `spec.follow.walWorkers` above 1, because their `pgcopydb clone --help` does not list `--wal-workers`.
+`0.18.157.g5fa0950` also keeps the SQLite statements of receive and apply prepared, so receive uses less CPU ([fork PR #43](https://github.com/ydixken/pgcopydb/pull/43)).
+
+`0.18.144.g86bf908` added the compare progress lines.
 `pgcopydb compare data` logs a `compare progress:` line of JSON counters when its workers start, then every 10 seconds.
 It logs one last line with `"final":true`.
 The operator reads these lines into [`status.verificationProgress`](../operations/verification.md#progress).
@@ -583,7 +588,7 @@ See [All databases configuration](../configuration.md#all-databases) and [the ex
 Before the first attempt, and after the connectivity probes, the preflight Job also checks the requirements of this section:
 
 - `wal_level`.
-- Free-slot headroom.
+- Free-slot headroom, or the [WAL worker](#wal-workers) headroom.
 - `wal_sender_timeout`, which only warns.
 - The source role's REPLICATION attribute.
 - EXECUTE on the origin functions.
@@ -753,6 +758,38 @@ Schema and workload contract:
   `compare data` covers tables, not `pg_largeobject`, so `Verified` stays `True`.
   The [`limitations/large_object_change`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Sequences need no action: pgcopydb re-syncs them automatically after cutover.
+
+### WAL workers
+
+With [`spec.follow.walWorkers`](../configuration.md#wal-workers) set to a value N above 1, each worker uses its own slot, WAL sender, origin, and target connections.
+Preflight then checks these items in place of the single free-slot check.
+
+Source instance:
+
+- N free replication slots (`max_replication_slots`).
+- N + 1 free WAL senders (`max_wal_senders`) during the base copy.
+  The connection that holds the snapshot stays open until the base copy ends.
+  After the base copy, the workers use N WAL senders.
+- PostgreSQL 13 or later, because PostgreSQL 12 cannot publish partitioned tables.
+  Preflight does not check the version.
+  pgcopydb refuses an older source when the first attempt starts.
+
+Source role:
+
+- The role MUST be able to create one publication for each published table.
+  These are the same rights as for the automatic publication: CREATE on the source database and ownership of each published table.
+  The role needs no other rights.
+
+Target instance:
+
+- N free replication origins.
+  Up to PostgreSQL 17, `max_replication_slots` sets the origin limit.
+  On PostgreSQL 18 and later, `max_active_replication_origins` sets it.
+- Approximately 2N connections for apply, two for each worker, plus the table and index jobs of the clone.
+  Include them in `max_connections`.
+  Preflight does not check the connection count.
+
+Preflight also makes sure that the pgcopydb of the runner image lists `--wal-workers`, and that each `highTrafficTables` entry exists on the source.
 
 ## Superuser remediation (`superuserSecretRef`)
 

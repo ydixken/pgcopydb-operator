@@ -19,7 +19,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -37,6 +40,8 @@ import (
 
 // testOwnerRole is the role the ownerAfterRestore rules are exercised with.
 const testOwnerRole = "app_owner"
+
+const reservedSlotSuffix = "slotName must not end in _w<digits> or _t<digits>"
 
 // Exercises the CRD CEL rules through the envtest apiserver: the schema in
 // config/crd/bases is what real clusters enforce, so this is where a broken
@@ -389,6 +394,10 @@ var _ = Describe("Migration CRD validation", func() {
 		changed.Spec.Follow.Enabled = false
 		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
 
+		changed = fresh()
+		changed.Spec.Follow.WalWorkers = 2
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
+
 		// Control: clone tuning and the cutover trigger stay mutable.
 		changed = fresh()
 		changed.Spec.Clone.TableJobs = 8
@@ -558,6 +567,200 @@ var _ = Describe("Migration CRD validation", func() {
 		allDatabasesEntries(v1beta1.GroupVersion),
 		allDatabasesEntries(v1alpha1.GroupVersion),
 	)
+
+	// Unstructured, so one table covers both served versions; the maps hold
+	// JSON types (int64, []any) because SetNestedMap deep-copies them.
+	walWorkersEntries := func(gv schema.GroupVersion) []TableEntry {
+		tables := func(names ...string) []any {
+			out := make([]any, len(names))
+			for i, n := range names {
+				out[i] = n
+			}
+			return out
+		}
+		follow := func(extra map[string]any) map[string]any {
+			f := map[string]any{"enabled": true}
+			maps.Copy(f, extra)
+			return f
+		}
+		ww := func(n int64, extra map[string]any) map[string]any {
+			f := follow(extra)
+			f["walWorkers"] = n
+			return f
+		}
+		hot := func(names ...string) map[string]any { return map[string]any{"highTrafficTables": tables(names...)} }
+		slotLen := func(n int) map[string]any { return map[string]any{"slotName": strings.Repeat("a", n)} }
+		const r1 = "walWorkers above 1 requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or insertOnlyTables"
+		const r2 = "walWorkers above 1 requires a slotName of at most 51 characters"
+		const r3 = "highTrafficTables requires walWorkers above 1 and at most walWorkers entries"
+		slotNamed := func(name string) map[string]any { return map[string]any{"slotName": name} }
+		entry := func(desc, name string, spec map[string]any, wantErr string) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-ww-"+name+"-"+gv.Version, spec, wantErr)
+		}
+		return []TableEntry{
+			entry("two workers", "two", ww(2, nil), ""),
+			entry("sixteen workers", "max", ww(16, nil), ""),
+			entry("zero workers", "zero", ww(0, nil), "should be greater than or equal to 1"),
+			entry("seventeen workers", "over", ww(17, nil), "should be less than or equal to 16"),
+			entry("workers with follow disabled", "disabled", ww(2, map[string]any{"enabled": false}), r1),
+			entry("workers with wal2json", "wal2json", ww(2, map[string]any{"plugin": v1beta1.PluginWal2json}), r1),
+			entry("workers with explicit pgoutput", "pgoutput", ww(2, map[string]any{"plugin": v1beta1.PluginPGOutput}), ""),
+			entry("workers with a publication", "pub", ww(2, map[string]any{"publication": "foreign"}), r1),
+			entry("workers with unloggedTables", "unlogged", ww(2, map[string]any{
+				"unloggedTables": []any{map[string]any{"table": "app.cache", "mode": v1beta1.UnloggedSchemaOnly}},
+			}), r1),
+			entry("workers with insertOnlyTables", "insert-only", ww(2, map[string]any{
+				"insertOnlyTables": tables("app.events"),
+			}), r1),
+			// Control: the partial table policies stay legal on the single stream.
+			entry("one worker with insertOnlyTables", "one-insert-only", ww(1, map[string]any{
+				"insertOnlyTables": tables("app.events"),
+			}), ""),
+			entry("workers with a 52-character slot", "slot-52", ww(2, slotLen(52)), r2),
+			entry("workers with a 51-character slot", "slot-51", ww(2, slotLen(51)), ""),
+			entry("one worker with a 52-character slot", "one-slot-52", ww(1, slotLen(52)), ""),
+			entry("high-traffic tables without workers", "hot-unset",
+				follow(hot("app.events")), r3),
+			entry("high-traffic tables with one worker", "hot-one", ww(1, hot("app.events")), r3),
+			entry("more high-traffic tables than workers", "hot-over",
+				ww(2, hot("app.a", "app.b", "app.c")), r3),
+			entry("as many high-traffic tables as workers", "hot-ok",
+				ww(2, hot("app.a", "app.b")), ""),
+			entry("uppercase high-traffic table", "hot-upper", ww(2, hot("app.Events")), "should match"),
+			entry("high-traffic table without schema", "hot-bare", ww(2, hot("events")), "should match"),
+			entry("duplicate high-traffic tables", "hot-dup",
+				ww(2, hot("app.a", "app.a")), "Duplicate value"),
+			// The worker suffix rule holds whatever walWorkers is, so a sweep never matches another base slot.
+			entry("single-stream slot ending in _w1", "w1-unset", follow(slotNamed("foo_w1")), reservedSlotSuffix),
+			entry("single-stream slot ending in _t12", "t12-unset", follow(slotNamed("foo_t12")), reservedSlotSuffix),
+			entry("workers with a slot ending in _w1", "w1-two", ww(2, slotNamed("foo_w1")), reservedSlotSuffix),
+			entry("workers with a slot ending in _t12", "t12-two", ww(2, slotNamed("foo_t12")), reservedSlotSuffix),
+			entry("workers with a slot ending in _w", "w-bare", ww(2, slotNamed("foo_w")), ""),
+			entry("workers with a slot ending in _wx", "wx", ww(2, slotNamed("foo_wx")), ""),
+			entry("workers with a slot ending in _w1x", "w1x", ww(2, slotNamed("foo_w1x")), ""),
+			entry("workers with slot w1", "w1-only", ww(2, slotNamed("w1")), ""),
+		}
+	}
+	DescribeTable("walWorkers and highTrafficTables rules",
+		func(gv schema.GroupVersion, name string, follow map[string]any, wantErr string) {
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration(name))
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			Expect(unstructured.SetNestedMap(u.Object, follow, "spec", "follow")).To(Succeed())
+			err = k8sClient.Create(ctx, u)
+			if wantErr == "" {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring(wantErr)))
+		},
+		walWorkersEntries(v1beta1.GroupVersion),
+		walWorkersEntries(v1alpha1.GroupVersion),
+	)
+
+	walWorkersAllDatabasesEntries := func(gv schema.GroupVersion) []TableEntry {
+		entry := func(desc, name string, workers int32, wantErr bool) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-ww-alldb-"+name+"-"+gv.Version, workers, wantErr)
+		}
+		return []TableEntry{
+			entry("two workers", "two", 2, true),
+			entry("one worker", "one", 1, false),
+		}
+	}
+	DescribeTable("walWorkers with allDatabases",
+		func(gv schema.GroupVersion, name string, workers int32, wantErr bool) {
+			m := validMigration(name)
+			m.Spec.Clone.AllDatabases = true
+			// Follow stays disabled with one worker, which allDatabases needs.
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: workers > 1, WalWorkers: workers}
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(m)
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			err = k8sClient.Create(ctx, u)
+			if !wantErr {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring("follow.walWorkers above 1 cannot be combined with clone.allDatabases")))
+		},
+		walWorkersAllDatabasesEntries(v1beta1.GroupVersion),
+		walWorkersAllDatabasesEntries(v1alpha1.GroupVersion),
+	)
+
+	// spec.follow is immutable, so without CRD validation ratcheting a Migration
+	// stored before the suffix rule could never change again, not even to approve cutover.
+	// Serial: it edits the shared CRD, which would break specs that run in parallel.
+	It("ratchets the slotName suffix rule for a Migration stored before it", Serial, func() {
+		crdKey := types.NamespacedName{Name: "migrations.pgcopydb-operator.io"}
+		getCRD := func() *unstructured.Unstructured {
+			crd := &unstructured.Unstructured{}
+			crd.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition",
+			})
+			ExpectWithOffset(1, k8sClient.Get(ctx, crdKey, crd)).To(Succeed())
+			return crd
+		}
+		// Retried, as the apiserver also writes the CRD status.
+		putSpec := func(spec any) {
+			Eventually(func() error {
+				latest := getCRD()
+				latest.Object["spec"] = runtime.DeepCopyJSONValue(spec)
+				return k8sClient.Update(ctx, latest)
+			}).WithTimeout(30 * time.Second).Should(Succeed())
+		}
+		crd := getCRD()
+		original := runtime.DeepCopyJSONValue(crd.Object["spec"])
+		DeferCleanup(func() { putSpec(original) })
+
+		versions, _, err := unstructured.NestedSlice(crd.Object, "spec", "versions")
+		Expect(err).NotTo(HaveOccurred())
+		dropped := 0
+		for _, v := range versions {
+			path := []string{"schema", "openAPIV3Schema", "properties", "spec", "properties", "follow", "x-kubernetes-validations"}
+			rules, _, err := unstructured.NestedSlice(v.(map[string]any), path...)
+			Expect(err).NotTo(HaveOccurred())
+			kept := []any{}
+			for _, r := range rules {
+				if strings.Contains(r.(map[string]any)["rule"].(string), "self.slotName.matches") {
+					dropped++
+					continue
+				}
+				kept = append(kept, r)
+			}
+			Expect(unstructured.SetNestedSlice(v.(map[string]any), kept, path...)).To(Succeed())
+		}
+		Expect(dropped).To(Equal(len(versions)), "every served version must carry the rule")
+		Expect(unstructured.SetNestedSlice(crd.Object, versions, "spec", "versions")).To(Succeed())
+		putSpec(crd.Object["spec"])
+
+		m := validMigration("cel-ratchet-suffix")
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "orders_w1"}
+		Eventually(func() error { return k8sClient.Create(ctx, m.DeepCopy()) }).
+			WithTimeout(30 * time.Second).Should(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		putSpec(original)
+		probe := validMigration("cel-ratchet-probe")
+		probe.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "orders_w2"}
+		Eventually(func(g Gomega) {
+			err := k8sClient.Create(ctx, probe.DeepCopy())
+			if err == nil {
+				_ = k8sClient.Delete(ctx, probe)
+			}
+			g.Expect(err).To(MatchError(ContainSubstring(reservedSlotSuffix)))
+		}).WithTimeout(30 * time.Second).Should(Succeed())
+
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got)).To(Succeed())
+		got.Spec.Cutover.Approved = true
+		Expect(k8sClient.Update(ctx, got)).To(Succeed())
+	})
 
 	// The rule sits on MigrationSpec, not CloneOptions: a transition rule on
 	// clone is skipped when either side of the update leaves spec.clone out.

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ const (
 	reasonLagBelowThreshold = "LagBelowThreshold"
 	reasonConfirmingCatchUp = "ConfirmingCatchUp"
 	reasonLagging           = "Lagging"
+	reasonWorkerSlotMissing = "WorkerSlotMissing"
 )
 
 // lagSeenBelow reports whether an earlier pass already measured the lag below
@@ -69,7 +71,7 @@ func lagSeenBelow(m *v1beta1.Migration) bool {
 // SentinelOps drives a running follow migration; nil disables follow handling
 // (envtest injects a fake).
 type SentinelOps interface {
-	Read(ctx context.Context, namespace, jobName, slotName string) (*sentinel.State, error)
+	Read(ctx context.Context, namespace, jobName string, slots []string) (*sentinel.State, error)
 	SetEndposCurrent(ctx context.Context, namespace, jobName string) (string, error)
 	NudgeEndpos(ctx context.Context, namespace, jobName string) error
 }
@@ -79,10 +81,7 @@ func followEnabled(m *v1beta1.Migration) bool {
 }
 
 func effectiveSlotName(m *v1beta1.Migration) string {
-	if m.Spec.Follow != nil && m.Spec.Follow.SlotName != "" {
-		return m.Spec.Follow.SlotName
-	}
-	return pgcopydb.SlotName(m.Namespace, m.Name)
+	return pgcopydb.EffectiveSlotName(&m.Spec, m.Namespace, m.Name)
 }
 
 func maxCatchupLagBytes(m *v1beta1.Migration) int64 {
@@ -126,8 +125,22 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	if r.Sentinel == nil {
 		return
 	}
-	slot := effectiveSlotName(m)
-	st, err := r.Sentinel.Read(ctx, m.Namespace, jobName, slot)
+	var workers int32
+	if m.Spec.Follow != nil {
+		workers = m.Spec.Follow.WalWorkers
+	}
+	slots := pgcopydb.WorkerSlots(effectiveSlotName(m), workers)
+	st, err := r.Sentinel.Read(ctx, m.Namespace, jobName, slots)
+	if errors.Is(err, sentinel.ErrSlotMissing) && cloneDone {
+		// A worker that cannot be measured must not let cutover start, and the
+		// reason resets the CaughtUp count. Before cloneDone it is no sample.
+		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionFalse, reasonWorkerSlotMissing,
+			err.Error()+"; cutover waits until every WAL worker slot reports its position")
+		if m.Status.Phase == v1beta1.PhaseCutoverPending {
+			m.Status.Phase = v1beta1.PhaseStreaming
+		}
+		return
+	}
 	if err != nil {
 		log.V(1).Info("sentinel read failed", "error", err)
 		return
@@ -135,7 +148,7 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	if st == nil {
 		return
 	}
-	rs := st.ToStatus(slot)
+	rs := st.ToStatus(slots[0])
 	if prev := m.Status.Replication; prev != nil {
 		// The sample is per side, and a target that does not answer (revoked
 		// grants, a restart) yields a write_lsn with no replay position:
@@ -145,10 +158,12 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 		if rs.Endpos == "" {
 			rs.Endpos = prev.Endpos
 		}
-		if rs.ReplayLSN == "" {
+		// Over several worker slots an unmeasured lag borrows nothing: a carried
+		// figure would count as the second sample CaughtUp needs.
+		if rs.ReplayLSN == "" && len(slots) == 1 {
 			rs.ReplayLSN = prev.ReplayLSN
 		}
-		if rs.LagBytes == nil {
+		if rs.LagBytes == nil && len(slots) == 1 {
 			// The previous figure, not a fresh one computed from a stale
 			// replay against a moved WAL head: that pair only ever reads as
 			// falling behind.
@@ -327,7 +342,7 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migr
 			// A source inside this namespace is deleted with it, nothing to
 			// clean; a source elsewhere keeps its slot, so name it.
 			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup",
-				"namespace %s is terminating, so the cleanup Job could not be created; a source inside this namespace is deleted with it, but a source outside it may retain replication slot %q and needs manual removal", m.Namespace, effectiveSlotName(m))
+				"namespace %s is terminating, so the cleanup Job could not be created; a source inside this namespace is deleted with it, but a source outside it may retain replication slot %s and needs manual removal", m.Namespace, leftoverSlots(m))
 			return true, nil
 		}
 		return false, err
@@ -345,7 +360,7 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migr
 	}
 	if !ok {
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup",
-			"stream cleanup failed after retries; the replication slot %q may be leaking WAL on the source and needs manual removal", effectiveSlotName(m))
+			"stream cleanup failed after retries; the replication slot %s may be leaking WAL on the source and needs manual removal", leftoverSlots(m))
 	}
 	return true, nil
 }

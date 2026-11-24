@@ -43,8 +43,9 @@ It does not tell you anything about your own data.
   In addition, it comments on a database that the app role owns, and it drops replication slots and origins.
   A managed-service admin role that is not a superuser, such as a member of `rds_superuser`, `cloudsqlsuperuser`, or `azure_pg_admin`, lacks some of these rights.
   With such a role, the run fails partway.
-- On the source, `wal_level=logical` and room for one more replication slot and WAL sender.
-  The suite runs one follow migration at a time.
+- On the source, `wal_level=logical`, 3 free replication slots, and 4 free WAL senders.
+  On the target, 3 free replication origins.
+  The suite runs one follow migration at a time, and the WAL workers spec needs this much room for its 3 workers.
   External mode runs as one Ginkgo process and refuses `ginkgo --procs` above 1, because it has one database pair.
 - A target on PostgreSQL 17 or later, not older than the source.
   The source may be PostgreSQL 14 or later.
@@ -204,6 +205,8 @@ Each of them skips with its reason in the report:
 These skips are runtime checks rather than labels, so a run started without the task's label filter skips them too.
 The task also excludes every spec labeled `chaos` or `flaky`, as the release-candidate run does.
 The metrics specs skip unless `E2E_PROMETHEUS_URL` or `E2E_PROMETHEUS_PORT_FORWARD` is set.
+The WAL workers spec skips when the pgcopydb in the runner image does not have `--wal-workers`.
+It then adds a report entry that starts with `WAL WORKERS NOT TESTED`.
 
 Release candidates run the suite against CloudNativePG fixtures only.
 CI covers the code of external mode itself with unit tests.

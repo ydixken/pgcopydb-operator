@@ -244,7 +244,24 @@ tests:
               description: >-
                 Cutover set an endpos but the target has not replayed up to
                 it, so the migration cannot complete. Check the worker logs
-                and the target's apply rate.
+                and the target's apply rate. With WAL workers, the foreign-key
+                build after endpos keeps the phase in CuttingOver while replay
+                already equals endpos.
+
+  # With WAL workers, pgcopydb builds foreign keys after endpos, so the phase
+  # stays CuttingOver for a long time while every slot already sits at endpos.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="fkbuild", phase="CuttingOver"}'
+        values: "1x60"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="fkbuild"}'
+        values: "5000x60"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="fkbuild"}'
+        values: "5000x60"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: PgcopydbMigrationCutoverStalled
+        exp_alerts: []
 
   # Commits blocked for over 15m fire, and at 14m the alert is still pending.
   # "clear" carries both conditions with status False only, which never fires.

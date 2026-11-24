@@ -137,21 +137,21 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports the receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the replay position of the walsender, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `0.18.144.g86bf908`, runs target COMMITs with `synchronous_commit=on` and checks the result of each COMMIT before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.157.g5fa0950`, runs target COMMITs with `synchronous_commit=on` and checks the result of each COMMIT before it reports their replay progress.
 On a target with synchronous standbys, each of those COMMITs waits until a standby acknowledges it, with or without [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target).
 `CommitsBlocked` becomes True when two samples in a row show a wait of 30 seconds or more.
 See [Commits blocked on synchronous replication](../troubleshooting.md#commits-blocked-on-synchronous-replication).
 If a proxy cuts the apply connection during such a wait, its backend still waits on the target and holds the replication origin.
 The next attempt resumes only when the [retry gate](lifecycle.md#retries-and-resume) finds that this session is gone and that a standby acknowledged a test commit.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/86bf908adca02d87063849dae775a02c1659c829/src/bin/pgcopydb/ld_stream.c#L1628-L1653) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_stream.c#L1676-L1701) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
 Other supported runner versions differ.
 See [client tool versions](../reference/prerequisites.md#client-tool-versions).
-After cutover, when the target replication origin is exactly on the frozen endpos, the drain verification proves this.
-Where the origin is not on endpos, the drain verification compares content.
+After cutover, when each target replication origin (one for each WAL worker) is exactly on the frozen endpos, the drain verification proves this.
+Where an origin is not on endpos, the drain verification compares content.
 In the first case, the proof depends only on the origin bookkeeping of the runner.
 
 > [!warning]
@@ -226,6 +226,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 
 4. When the approval and the two-sample `CaughtUp` verdict both hold, the operator sets the cutover LSN with pgcopydb `sentinel set endpos --current`.
     The worker then drains the remaining changes, syncs sequences, and exits.
+    With WAL workers, the worker also creates the foreign keys before it exits ([Cutover with WAL workers](#cutover-with-wal-workers)).
     The phase is `CuttingOver`.
 
 5. A drain verification Job (`<name>-verify`) proves the drain on the target.
@@ -236,10 +237,15 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 
     The fast path passes only when the target's replication origin is exactly on the cutover LSN.
     When any distance remains, the content decides, never the size of the distance.
-    Nearly every cutover takes the compare path.
+    With one WAL stream, nearly every cutover takes the compare path, and the exact-LSN pass is the exception.
     Size the write-downtime window for `compare data` over the selected storage tables.
     A [rehearsal](verification.md#rehearsal) measures the duration of that compare while the migration still streams.
-    Treat the exact-LSN pass as the exception.
+
+    With `spec.follow.walWorkers` above 1, each WAL worker has its own replication origin, and the fast path needs all of them exactly on the cutover LSN.
+    Each worker moves its origin to the cutover LSN when it finishes, also when its tables got no changes.
+    Thus after a clean finish, every origin is on the cutover LSN, and the Job passes on the fast path without `compare data`.
+    A worker that stops on a signal or an error does not move its origin, and neither does a resume that finds nothing to do.
+    When one origin is not on the cutover LSN, the content decides.
 
     The Job runs `pgcopydb compare data` and checks the report that `--json` prints.
     It does not rely on the exit status alone.
@@ -248,6 +254,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
     The result is a refusal, not a pass, when the compare could not run or when the Job cannot read the report.
 
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin.
+    With `spec.follow.walWorkers` above 1, it also drops each WAL worker slot and each per-table publication on the source, and each WAL worker origin on the target.
     After any requested [post-transfer verification](verification.md), `Complete` becomes True and the phase is `Completed`.
 
 7. Connect the application to the target.
@@ -267,6 +274,29 @@ Further specs require the target to match the content of the source after these 
 
 The guarantee stops at the freeze, because the source is silent from step 2 onward.
 [Automatic mode](#automatic-mode) below carries the same warning for the mode that skips approval.
+
+### Cutover with WAL workers
+
+With [`spec.follow.walWorkers`](../configuration.md#wal-workers) above 1, step 4 of the runbook has more work:
+
+1. Each worker applies its changes up to the cutover LSN.
+   Then it moves its replication origin to the cutover LSN, also when its tables got no changes.
+1. After every worker reaches the cutover LSN, pgcopydb creates the foreign keys on the target.
+   This step also checks the rows against each foreign key.
+   The target has no foreign keys before this step.
+1. pgcopydb syncs the sequences and exits.
+
+Thus the cutover window includes the foreign-key build.
+The size of the tables that have foreign keys sets its duration.
+Measure the build in a test migration of the same data, and include it in the write-downtime window.
+During the build, the phase stays `CuttingOver`, and the replay position already equals the cutover LSN.
+Thus the `PgcopydbMigrationCutoverStalled` alert does not fire during the build.
+Use the worker logs to monitor the build.
+
+pgcopydb exits with 0 only when every worker reached the same cutover LSN, and pgcopydb created the foreign keys and synced the sequences.
+When the run stops before that, pgcopydb exits with an error and logs that the foreign keys are pending.
+In step 5, the `<name>-verify` Job reads the replication origin of every worker.
+The fast path passes only when every origin is on the cutover LSN.
 
 ## Automatic mode
 

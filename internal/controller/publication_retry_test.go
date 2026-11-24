@@ -22,11 +22,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -50,6 +52,12 @@ func preludeWorker(t *testing.T, m *v1beta1.Migration, attempt int32, uri, pgcop
 	if err != nil {
 		t.Fatal(err)
 	}
+	return jobCommand(t, job, uri, pgcopydbStub)
+}
+
+// jobCommand is preludeWorker for any Job; uri serves as source and target.
+func jobCommand(t *testing.T, job *batchv1.Job, uri, pgcopydbStub string) (*exec.Cmd, string) {
+	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pgcopydb"), []byte(pgcopydbStub), 0o755); err != nil {
 		t.Fatal(err)
@@ -58,39 +66,50 @@ func preludeWorker(t *testing.T, m *v1beta1.Migration, attempt int32, uri, pgcop
 	commandCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(commandCtx, c.Command[0], append(c.Command[1:], c.Args...)...)
-	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "PGCOPYDB_SOURCE_PGURI="+uri)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"),
+		"PGCOPYDB_SOURCE_PGURI="+uri, "PGCOPYDB_TARGET_PGURI="+uri)
 	return cmd, dir
 }
 
 // TestStartOverPrelude runs a start-over attempt's prelude on stub binaries:
-// stream cleanup runs before the publication guard, and a failed one starts nothing.
+// stream cleanup runs first, then the WAL worker sweep on source and target,
+// then the publication guard, and a failed stream cleanup starts nothing.
 func TestStartOverPrelude(t *testing.T) {
-	for _, code := range []int{0, 1} {
-		t.Run(fmt.Sprintf("stream cleanup exits %d", code), func(t *testing.T) {
-			m := passwordMigration()
-			m.Spec.Source.PasswordSecretRef = nil
-			m.Spec.Clone.DropIfExists = true
-			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
-			m.Status.Conditions = []metav1.Condition{{
-				Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reasonSnapshotLost,
-			}}
-			calls := filepath.Join(t.TempDir(), "calls")
-			cmd, dir := preludeWorker(t, m, 3, "unused", fmt.Sprintf(
-				"#!/bin/sh\necho \"pgcopydb $1\" >> '%s'\n[ \"$1\" != stream ] || exit %d\n", calls, code))
-			if err := os.WriteFile(filepath.Join(dir, "psql"),
-				[]byte("#!/bin/sh\necho psql >> '"+calls+"'\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			want := "pgcopydb stream\npsql\npgcopydb clone\n"
-			if code != 0 {
-				want = "pgcopydb stream\n"
-			}
-			out, err := cmd.CombinedOutput()
-			got, _ := os.ReadFile(calls)
-			if (err != nil) != (code != 0) || string(got) != want {
-				t.Fatalf("err=%v, calls=%q, want %q, output=%s", err, got, want, out)
-			}
-		})
+	for _, tc := range []struct {
+		workers int32
+		psql    string
+	}{
+		{1, "psql source\n"},
+		{3, "psql source\npsql target\npsql source\n"},
+	} {
+		for _, code := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%d workers, stream cleanup exits %d", tc.workers, code), func(t *testing.T) {
+				m := passwordMigration()
+				m.Spec.Source.PasswordSecretRef = nil
+				m.Spec.Clone.DropIfExists = true
+				m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: tc.workers}
+				m.Status.Conditions = []metav1.Condition{{
+					Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reasonSnapshotLost,
+				}}
+				calls := filepath.Join(t.TempDir(), "calls")
+				cmd, dir := preludeWorker(t, m, 3, "source", fmt.Sprintf(
+					"#!/bin/sh\necho \"pgcopydb $1\" >> '%s'\n[ \"$1\" != stream ] || exit %d\n", calls, code))
+				cmd.Env = append(cmd.Env, "PGCOPYDB_TARGET_PGURI=target")
+				if err := os.WriteFile(filepath.Join(dir, "psql"),
+					[]byte("#!/bin/sh\necho \"psql $1\" >> '"+calls+"'\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				want := "pgcopydb stream\n" + tc.psql + "pgcopydb clone\n"
+				if code != 0 {
+					want = "pgcopydb stream\n"
+				}
+				out, err := cmd.CombinedOutput()
+				got, _ := os.ReadFile(calls)
+				if (err != nil) != (code != 0) || string(got) != want {
+					t.Fatalf("err=%v, calls=%q, want %q, output=%s", err, got, want, out)
+				}
+			})
+		}
 	}
 }
 
@@ -265,6 +284,179 @@ func TestPublicationRetrySQL(t *testing.T) {
 			}
 			if got := query(t, "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name='"+name+"')::text"); got != strconv.FormatBool(tc.slot) {
 				t.Errorf("source slot changed: exists=%s, want %t", got, tc.slot)
+			}
+		})
+	}
+}
+
+// liveQuery returns PGCOPYDB_TEST_PGURI and a psql runner against it, which
+// serves as source and target. The test skips without the variable.
+func liveQuery(t *testing.T) (string, func(t *testing.T, sql string) string) {
+	t.Helper()
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("CI supplies PGCOPYDB_TEST_PGURI for WAL worker cleanup SQL regressions")
+	}
+	psql, err := exec.LookPath("psql")
+	if err != nil {
+		t.Fatal("PGCOPYDB_TEST_PGURI is set but psql is missing")
+	}
+	return uri, func(t *testing.T, sql string) string {
+		t.Helper()
+		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(queryCtx, psql, uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("fixture SQL failed: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+}
+
+// sqlNames renders fixture names, which hold no quotes, as a SQL text array.
+func sqlNames(names []string) string {
+	return "ARRAY['" + strings.Join(names, "','") + "']"
+}
+
+// walWorkerFixture creates physical slots (CI runs wal_level=replica), empty
+// publications and replication origins, and drops them after the test. present
+// lists which of them still exist, comma-joined in byte order.
+func walWorkerFixture(t *testing.T, query func(*testing.T, string) string, slots, publications, origins []string) (present func() [3]string) {
+	t.Helper()
+	t.Cleanup(func() {
+		query(t, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name::text = ANY ("+sqlNames(slots)+")")
+		query(t, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin WHERE roname = ANY ("+sqlNames(origins)+")")
+		for _, p := range publications {
+			query(t, `DROP PUBLICATION IF EXISTS "`+p+`"`)
+		}
+	})
+	for _, s := range slots {
+		query(t, "SELECT slot_name FROM pg_create_physical_replication_slot('"+s+"')")
+	}
+	for _, p := range publications {
+		query(t, `CREATE PUBLICATION "`+p+`"`)
+	}
+	for _, o := range origins {
+		query(t, "SELECT pg_replication_origin_create('"+o+"')")
+	}
+	list := func(col, from string, names []string) string {
+		return query(t, "SELECT string_agg("+col+"::text, ',' ORDER BY "+col+`::text COLLATE "C") FROM `+from+
+			" WHERE "+col+"::text = ANY ("+sqlNames(names)+")")
+	}
+	return func() [3]string {
+		return [3]string{
+			list("slot_name", "pg_replication_slots", slots),
+			list("pubname", "pg_publication", publications),
+			list("roname", "pg_replication_origin", origins),
+		}
+	}
+}
+
+func sortedNames(names ...[]string) string {
+	all := slices.Concat(names...)
+	slices.Sort(all)
+	return strings.Join(all, ",")
+}
+
+// walWorkerDecoys are names that differ from a WAL worker name of base by one
+// suffix character, the suffix kind, or (look) a character LIKE's _ would match.
+func walWorkerDecoys(base string) (slots, publications []string) {
+	look := strings.Replace(base, "_", "x", 1)
+	return []string{base + "_wx", base + "_w1_extra", base + "_t1", look + "_w1"},
+		[]string{base, base + "_t", base + "_tx", base + "_t1x", base + "_w1", look + "_t1"}
+}
+
+// TestWalWorkersSweepSQL runs the cleanup Job on a stub stream cleanup against
+// a real server: the sweep drops exactly the worker slots, origins and
+// per-table publications of its own base name, and nothing after a failed cleanup.
+func TestWalWorkersSweepSQL(t *testing.T) {
+	uri, query := liveQuery(t)
+	base := fmt.Sprintf("wal_sweep_%d", time.Now().UnixNano())
+	slotDecoys, publicationDecoys := walWorkerDecoys(base)
+	workers := []string{base + "_w1", base + "_w12"}
+	tables := []string{base + "_t1", base + "_t12"}
+	present := walWorkerFixture(t, query, slices.Concat(workers, slotDecoys),
+		slices.Concat(tables, publicationDecoys), slices.Concat(workers, slotDecoys))
+
+	m := passwordMigration()
+	m.Spec.Source.PasswordSecretRef = nil
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: base, WalWorkers: 3}
+	job, err := buildCleanupJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []int{1, 0} {
+		cmd, _ := jobCommand(t, job, uri, fmt.Sprintf("#!/bin/sh\nexit %d\n", code))
+		out, err := cmd.CombinedOutput()
+		if (err != nil) != (code != 0) {
+			t.Fatalf("stream cleanup exit %d: err=%v, output=%s", code, err, out)
+		}
+		want := [3]string{sortedNames(workers, slotDecoys), sortedNames(tables, publicationDecoys), sortedNames(workers, slotDecoys)}
+		if code == 0 {
+			want = [3]string{sortedNames(slotDecoys), sortedNames(publicationDecoys), sortedNames(slotDecoys)}
+		}
+		if got := present(); got != want {
+			t.Fatalf("stream cleanup exit %d left slots, publications, origins:\n%q\nwant:\n%q\noutput=%s", code, got, want, out)
+		}
+	}
+}
+
+// TestWalWorkersPublicationRetrySQL runs the multi-worker retry guard against a
+// real server, with decoys that must neither satisfy nor trip it, nor be dropped.
+func TestWalWorkersPublicationRetrySQL(t *testing.T) {
+	uri, query := liveQuery(t)
+	for _, tc := range []struct {
+		name                string
+		slots, publications func(base string) []string
+		dropped             int // leading publications the guard drops
+		readOnly            bool
+		wantError           string
+	}{
+		{name: "established", slots: func(b string) []string { return []string{b, b + "_w1"} },
+			publications: func(b string) []string { return []string{b + "_t1"} }},
+		{name: "main slot without worker publications", slots: func(b string) []string { return []string{b} },
+			wantError: "publication retry refused: source slot"},
+		{name: "worker slot without the main slot", slots: func(b string) []string { return []string{b + "_w12"} },
+			publications: func(b string) []string { return []string{b + "_t1"} },
+			wantError:    "publication retry refused: WAL worker slots"},
+		{name: "orphan publications", publications: func(b string) []string { return []string{b + "_t1", b + "_t12"} },
+			dropped: 2},
+		{name: "neither exists"},
+		{name: "drop fails", publications: func(b string) []string { return []string{b + "_t1"} },
+			readOnly: true, wantError: "read-only transaction"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := fmt.Sprintf("wal_retry_%d", time.Now().UnixNano())
+			slotDecoys, publicationDecoys := walWorkerDecoys(base)
+			var slots, publications []string
+			if tc.slots != nil {
+				slots = tc.slots(base)
+			}
+			if tc.publications != nil {
+				publications = tc.publications(base)
+			}
+			present := walWorkerFixture(t, query, slices.Concat(slots, slotDecoys),
+				slices.Concat(publications, publicationDecoys), nil)
+
+			m := passwordMigration()
+			m.Spec.Source.PasswordSecretRef = nil
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: base, WalWorkers: 3}
+			cmd, _ := preludeWorker(t, m, 2, uri, "#!/bin/sh\nprintf '%s\\n' '"+publicationWorkerStarted+"'\n")
+			if tc.readOnly {
+				cmd.Env = append(cmd.Env, "PGOPTIONS=-c default_transaction_read_only=on")
+			}
+			out, err := cmd.CombinedOutput()
+			started := strings.Contains(string(out), publicationWorkerStarted)
+			if tc.wantError != "" {
+				if err == nil || started || !strings.Contains(string(out), tc.wantError) {
+					t.Fatalf("retry must fail before pgcopydb with %q: err=%v, output=%s", tc.wantError, err, out)
+				}
+			} else if err != nil || !started {
+				t.Fatalf("retry did not start pgcopydb: err=%v, output=%s", err, out)
+			}
+			want := [3]string{sortedNames(slots, slotDecoys), sortedNames(publications[tc.dropped:], publicationDecoys)}
+			if got := present(); got != want {
+				t.Fatalf("slots, publications after the guard:\n%q\nwant:\n%q", got, want)
 			}
 		})
 	}

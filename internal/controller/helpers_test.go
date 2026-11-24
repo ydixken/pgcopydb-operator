@@ -239,6 +239,8 @@ const (
 	jobKindVerify    = "verify"
 	jobKindPreflight = "preflight"
 	jobKindRehearsal = "rehearsal"
+	jobKindGate      = "retry gate"
+	jobKindCatalog   = "catalog"
 )
 
 // The worker default must not leak onto the other Jobs. buildJob, cleanup,

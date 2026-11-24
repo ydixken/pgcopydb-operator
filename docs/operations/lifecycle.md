@@ -260,17 +260,38 @@ Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
 - **Live Migration that ever started**: a finalizer routes deletion through cleanup, because a leaked replication slot retains WAL on the source forever.
   The operator first stops the worker and a running [verification rehearsal](verification.md#rehearsal).
   It then runs the cleanup Job, which drops the slot, the auto-created publication, and the target origin.
+  With `spec.follow.walWorkers` above 1, the Job also drops each WAL worker slot, each per-table publication, and each WAL worker origin.
+  It finds them from the slot name, so it also drops them when the work volume is lost.
   Last, it releases the CR to garbage collection.
   Deletion therefore takes a few reconcile cycles, not milliseconds.
-- **Cleanup that cannot finish**: if cleanup uses all its retries, the operator emits a `CleanupFailed` warning that names the slot.
+- **Cleanup that cannot finish**: if cleanup uses all its retries, the operator emits a `CleanupFailed` warning that names the slot and each WAL worker slot.
   It then releases the Migration anyway.
   This occurs, for instance, when the source is gone.
   An unreachable source should not block deletion forever.
   If the source still exists, check `pg_replication_slots` on the source.
-  Then run `SELECT pg_drop_replication_slot('<slot>')` manually.
+  Then run `SELECT pg_drop_replication_slot('<slot>')` manually for each named slot.
+  With `spec.follow.walWorkers` above 1, also drop the per-table publications on the source and the WAL worker origins on the target.
+  The cleanup sweep finds these objects with the name tests below, where `<slot>` is the slot name.
+  Do not use `LIKE`: its `_` wildcard can match the objects of a different Migration.
+  On the source, list the per-table publications, then run `DROP PUBLICATION` for each name:
+
+  ```sql
+  SELECT pubname FROM pg_catalog.pg_publication
+  WHERE left(pubname, length('<slot>')) = '<slot>'
+    AND substr(pubname, length('<slot>') + 1) ~ '^_t[0-9]+$';
+  ```
+
+  On the target, drop the WAL worker origins:
+
+  ```sql
+  SELECT pg_catalog.pg_replication_origin_drop(roname) FROM pg_catalog.pg_replication_origin
+  WHERE left(roname, length('<slot>')) = '<slot>'
+    AND substr(roname, length('<slot>') + 1) ~ '^_w[0-9]+$';
+  ```
+
 - **Deleting the whole namespace**: we support it.
   A terminating namespace refuses new Jobs, so cleanup cannot run there.
-  The operator emits the same `CleanupFailed` warning, which names the slot, and releases the Migration.
+  The operator emits the same `CleanupFailed` warning, which names the slots, and releases the Migration.
   So namespace deletion never deadlocks against the finalizer.
   The namespace deletion also deletes a source inside the namespace, so nothing leaks.
   A source outside the namespace (another namespace, or outside the cluster) keeps its slot and retains WAL.
