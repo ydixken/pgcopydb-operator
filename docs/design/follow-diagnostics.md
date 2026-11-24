@@ -26,8 +26,8 @@ The snapshot does not run pgcopydb, open the worker's catalogs, inspect SQL or r
 
 ## What the snapshot can distinguish
 
-The [pinned feedback path](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_stream.c#L1645-L1701) reports receive progress as `write_lsn` and source-visible replay feedback as `replay_lsn`.
-The bundled runner is pgcopydb `0.18.157.g5fa0950`.
+The [pinned feedback path](https://github.com/ydixken/pgcopydb/blob/9d8b660f412238f4c5c04d29ad40425e12ec57d5/src/bin/pgcopydb/ld_stream.c#L1645-L1701) reports receive progress as `write_lsn` and source-visible replay feedback as `replay_lsn`.
+The bundled runner is pgcopydb `0.18.159.g9d8b660`.
 For replay and flush feedback, it certifies genuine primary keepalive positions from the current connection when all of these conditions are true:
 
 - Initialized durable apply covers every non-skipped COMMIT that receive has read.
@@ -37,7 +37,7 @@ For replay and flush feedback, it certifies genuine primary keepalive positions 
 
 Synthetic keepalives and WAL data headers cannot establish that boundary.
 So confirmed flush is not an independent transformation boundary, and `replay_lsn` is not strictly the position of the last applied data transaction.
-The [apply path confirms target COMMIT results](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_apply.c#L1370-L1385) with [`synchronous_commit=on`](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_apply.c#L38-L44) before it advances its data cursor.
+The [apply path confirms target COMMIT results](https://github.com/ydixken/pgcopydb/blob/9d8b660f412238f4c5c04d29ad40425e12ec57d5/src/bin/pgcopydb/ld_apply.c#L1370-L1385) with [`synchronous_commit=on`](https://github.com/ydixken/pgcopydb/blob/9d8b660f412238f4c5c04d29ad40425e12ec57d5/src/bin/pgcopydb/ld_apply.c#L38-L44) before it advances its data cursor.
 It commits several source transactions in one target transaction, an [apply group](../operations/performance.md#apply-groups).
 It sends the origin setup and the group `COMMIT` as one query.
 When the target refuses that `COMMIT` and the connection stays up, it moves the origin back ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
@@ -63,7 +63,7 @@ The burst commits as one transaction: target rows can remain zero during healthy
 ### The zero-guard window
 
 The sentinel seeds `replay_lsn` at `0/0`.
-The [override that reports the apply cursor as the feedback flush position](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_stream.c#L1681-L1701) has a guard: it applies only when that value is non-zero.
+The [override that reports the apply cursor as the feedback flush position](https://github.com/ydixken/pgcopydb/blob/9d8b660f412238f4c5c04d29ad40425e12ec57d5/src/bin/pgcopydb/ld_stream.c#L1681-L1701) has a guard: it applies only when that value is non-zero.
 Until the first sentinel sync of the apply loop, the worker continues to confirm its raw receive position instead.
 That is why the lag reads near zero, whatever the apply backlog is.
 The worker also reports its apply position as `0/0` throughout that window.
@@ -102,8 +102,8 @@ The case keeps `approved: false`.
 ## Why SQLite file sizes are not the replacement
 
 The pinned pipeline writes received changes to output SQLite databases and transformed statements to replay SQLite databases.
-The [apply loop invokes transformation inline](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_apply.c#L703-L742), and both stages share one process and an in-memory progress record.
-That record is [checkpointed after every 64 inline-transform passes that make progress](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_apply.c#L812-L820), not at a fixed wall-clock interval.
+The [apply loop invokes transformation inline](https://github.com/ydixken/pgcopydb/blob/9d8b660f412238f4c5c04d29ad40425e12ec57d5/src/bin/pgcopydb/ld_apply.c#L703-L742), and both stages share one process and an in-memory progress record.
+That record is [checkpointed after every 64 inline-transform passes that make progress](https://github.com/ydixken/pgcopydb/blob/9d8b660f412238f4c5c04d29ad40425e12ec57d5/src/bin/pgcopydb/ld_apply.c#L812-L820), not at a fixed wall-clock interval.
 Per-process CPU and I/O counts therefore do not separate the two stages, and the persisted record need not describe a long-running operation.
 
 [SQLite WAL mode](https://www.sqlite.org/wal.html#avoiding_excessively_large_wal_files) normally recycles a checkpointed WAL file without truncating it.
