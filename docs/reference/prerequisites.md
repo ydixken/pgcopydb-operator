@@ -75,7 +75,7 @@ The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](ht
 The progress poll supports twenty-three pgcopydb versions, with different guarantees.
 
 The bundled runner, `0.18.159.g9d8b660`, does not copy the publications that pgcopydb creates on the source to the target ([fork PR #45](https://github.com/ydixken/pgcopydb/pull/45)).
-These are the automatic publication and, with `spec.follow.walWorkers` above 1, the per-table publications `<slot>_t<table oid>`.
+These are the automatic publication or, with `spec.follow.walWorkers` above 1, the per-table publications `<slot>_t<table oid>`.
 Older runners copy them to the target in the post-data step of `pgcopydb clone --follow`, and cleanup does not drop them there.
 Other publications of the source, which include a publication that `spec.follow.publication` names, go to the target with all runners.
 
