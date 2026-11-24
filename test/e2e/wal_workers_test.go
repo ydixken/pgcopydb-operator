@@ -143,7 +143,8 @@ func walWorkersCutover() {
 	Expect(k8sClient.Patch(ctx, m, patch)).To(Succeed())
 
 	By("completing with every worker origin at endpos and a clean data compare")
-	m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+	logs := map[string]jobPodLog{}
+	m = waitCompletedCapturing(mig, followTimeout, logs, name+"-verify")
 	expectSingleAttempt(m)
 	expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 	expectConditionTrue(m, v1beta1.ConditionVerified)
@@ -152,10 +153,11 @@ func walWorkersCutover() {
 	Expect(m.Status.Replication).NotTo(BeNil())
 	endpos, err := sentinel.ParseLSN(m.Status.Replication.Endpos)
 	Expect(err).NotTo(HaveOccurred(), "status.replication.endpos %q", m.Status.Replication.Endpos)
-	verifyLog := jobLogs(name+"-verify", verifyLogLines)
+	verifyLog, err := succeededJobLog(logs, name+"-verify")
+	Expect(err).NotTo(HaveOccurred())
 	Expect(verifyLog).To(MatchRegexp(`drain verified: origin progress equals endpos \S+ on all %d WAL worker origins`,
 		walWorkersCount), "the verify Job did not take the exact-LSN path:\n%s", logTail(verifyLog, 40))
-	expectDrainProgress(m)
+	expectDrainProgress(m, verifyLog)
 	origins := walWorkerOriginProgress(verifyLog)
 	Expect(origins).To(HaveLen(walWorkersCount), "origins the verify Job measured:\n%s", logTail(verifyLog, 40))
 	for _, s := range slots {

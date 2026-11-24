@@ -47,7 +47,7 @@ var _ = Describe("Partition verification", func() {
 		m, schema := newPartitionVerificationMigration()
 		m.Spec.Suspend = true
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		captured := map[string]comparePodLog{}
+		captured := map[string]jobPodLog{}
 		reportVerificationOnFailure(m, captured)
 		waitPhase(m.Name, nsE2E, migrationTimeout, v1beta1.PhaseSuspended)
 
@@ -126,12 +126,12 @@ var _ = Describe("Partition verification", func() {
 			g.Expect(job.Spec.Suspend == nil || !*job.Spec.Suspend).To(BeTrue())
 		}, migrationTimeout, time.Second).Should(Succeed())
 
-		completed := waitCompletedCapturing(m, captured)
+		completed := waitCompletedCapturing(m, migrationTimeout, captured, compareJobs(m.Name)...)
 		expectVerification(completed, false)
 		for _, check := range []string{compareSchemaCheck, compareDataCheck} {
 			var attempts []string
 			for _, attempt := range captured {
-				if attempt.check == check {
+				if attempt.job == m.Name+"-compare-"+check {
 					attempts = append(attempts, attempt.log)
 				}
 			}

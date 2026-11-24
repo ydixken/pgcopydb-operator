@@ -68,7 +68,7 @@ func coverageMarkerSchema(identity string) string {
 // follow Migration over them, not yet created, with its compare-log capture.
 func prepareCoverageFollow(
 	name string, cases []coverageCase, identity string,
-) (*v1beta1.Migration, map[string]comparePodLog) {
+) (*v1beta1.Migration, map[string]jobPodLog) {
 	GinkgoHelper()
 	marker := coverageMarkerSchema(identity)
 	schemas := append(coverageSchemaNames(cases, identity), marker)
@@ -81,7 +81,7 @@ func prepareCoverageFollow(
 		applyCoverageSection(c, c.setup, identity)
 	}
 	psql(sourceCluster, asSourceAppRole()+"CREATE TABLE "+sqlIdent(marker)+".marker (id int PRIMARY KEY)")
-	captured := map[string]comparePodLog{}
+	captured := map[string]jobPodLog{}
 	reportVerificationOnFailure(m, captured)
 	return m, captured
 }
@@ -101,14 +101,14 @@ func runCoverageFollow(m *v1beta1.Migration, cases []coverageCase, identity stri
 // cutOverCoverageFollow waits for a marker written after every @follow to
 // reach the target, approves the cutover and returns the Completed Migration.
 func cutOverCoverageFollow(
-	m *v1beta1.Migration, identity string, captured map[string]comparePodLog,
+	m *v1beta1.Migration, identity string, captured map[string]jobPodLog,
 ) *v1beta1.Migration {
 	GinkgoHelper()
 	table := sqlIdent(coverageMarkerSchema(identity)) + ".marker"
 	psql(sourceCluster, asSourceAppRole()+"INSERT INTO "+table+" VALUES (1)")
 	waitOnTarget(m, "SELECT count(*) FROM "+table, "1")
 	approveCutover(m.Name)
-	completed := waitCompletedCapturing(m, captured)
+	completed := waitCompletedCapturing(m, migrationTimeout, captured, compareJobs(m.Name)...)
 	expectConditionTrue(completed, v1beta1.ConditionCutoverComplete)
 	return completed
 }
