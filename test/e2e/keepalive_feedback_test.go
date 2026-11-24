@@ -111,7 +111,8 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	pods := &corev1.PodList{}
 	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
 		client.MatchingLabels{"job-name": job.Name})).To(Succeed())
-	Expect(len(pods.Items)).To(Equal(1), "expected one worker pod")
+	found := len(pods.Items)
+	Expect(found).To(Equal(1), "expected one worker pod")
 	Expect(m.Status.WorkerLogCursor).NotTo(BeNil())
 	Expect(m.Status.WorkerLogCursor.JobUID).To(Equal(string(job.UID)))
 	Expect(m.Status.WorkerLogCursor.PodUID).To(Equal(string(pods.Items[0].UID)))
