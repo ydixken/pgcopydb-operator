@@ -5,7 +5,7 @@ Read the keywords MUST, SHOULD, and MAY as RFC 2119 describes them.
 
 This page covers the base clone (`pgcopydb clone`), the whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 The ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/).
-For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/86bf908adca02d87063849dae775a02c1659c829).
+For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/5fa095015df20f509a18ed81ee364ee95ea34ff5).
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record the scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot check.
 
@@ -72,9 +72,13 @@ The check matches that description, not only the flag name, because another pgco
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twenty-one pgcopydb versions, with different guarantees.
+The progress poll supports twenty-two pgcopydb versions, with different guarantees.
 
-The bundled runner, `0.18.144.g86bf908`, added the compare progress lines.
+The bundled runner, `0.18.157.g5fa0950`, added [WAL workers](#wal-workers) ([fork PR #44](https://github.com/ydixken/pgcopydb/pull/44)).
+With `0.18.144.g86bf908` and older runners, preflight refuses `spec.follow.walWorkers` above 1, because their `pgcopydb clone --help` does not list `--wal-workers`.
+`0.18.157.g5fa0950` also keeps the SQLite statements of receive and apply prepared, so receive uses less CPU ([fork PR #43](https://github.com/ydixken/pgcopydb/pull/43)).
+
+`0.18.144.g86bf908` added the compare progress lines.
 `pgcopydb compare data` logs a `compare progress:` line of JSON counters when its workers start, then every 10 seconds.
 It logs one last line with `"final":true`.
 The operator reads these lines into [`status.verificationProgress`](../operations/verification.md#progress).

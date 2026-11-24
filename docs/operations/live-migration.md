@@ -137,14 +137,14 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports the receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the replay position of the walsender, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `0.18.144.g86bf908`, runs target COMMITs with `synchronous_commit=on` and checks the result of each COMMIT before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.157.g5fa0950`, runs target COMMITs with `synchronous_commit=on` and checks the result of each COMMIT before it reports their replay progress.
 On a target with synchronous standbys, each of those COMMITs waits until a standby acknowledges it, with or without [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target).
 `CommitsBlocked` becomes True when two samples in a row show a wait of 30 seconds or more.
 See [Commits blocked on synchronous replication](../troubleshooting.md#commits-blocked-on-synchronous-replication).
 If a proxy cuts the apply connection during such a wait, its backend still waits on the target and holds the replication origin.
 The next attempt resumes only when the [retry gate](lifecycle.md#retries-and-resume) finds that this session is gone and that a standby acknowledged a test commit.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/86bf908adca02d87063849dae775a02c1659c829/src/bin/pgcopydb/ld_stream.c#L1628-L1653) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_stream.c#L1676-L1701) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.

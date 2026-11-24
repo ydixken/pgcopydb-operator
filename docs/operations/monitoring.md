@@ -214,12 +214,12 @@ Apply backlog reads both operands from the same walsender row, so the order that
 Without `pg_read_all_stats`, both operands use the slot's `confirmed_flush_lsn` instead, and the difference reads zero.
 This zero means unknown, not caught up.
 
-The bundled runner, pgcopydb `0.18.144.g86bf908`, runs its target commits with `synchronous_commit=on` before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.157.g5fa0950`, runs its target commits with `synchronous_commit=on` before it reports their replay progress.
 On a target with synchronous standbys, each of those commits waits for a standby, whatever [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target) says.
 The `CommitsBlocked` condition reports a wait that lasts.
 The runner writes that progress at most one time each second.
 As a result, the replay gauge can be behind the target replication origin by about one second.
-The runner can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/86bf908adca02d87063849dae775a02c1659c829/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection.
+The runner can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/5fa095015df20f509a18ed81ee364ee95ea34ff5/src/bin/pgcopydb/ld_stream.c#L1676-L1701) from the current connection.
 This moves the network feedback forward across filtered WAL.
 That feedback does not move the target replication origin or the data replay cursor of the sentinel.
 For the conditions, see [Follow diagnostics](../design/follow-diagnostics.md).
