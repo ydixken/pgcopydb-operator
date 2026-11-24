@@ -230,7 +230,9 @@ One confirmation prompt up front covers all three; each combo is echoed before i
 The fixture namespaces stay up between combos (only a cluster on the wrong major gets recreated) and the last combo tears them down.
 A failing combo does not stop the rest: the task prints a pass/fail summary at the end and exits nonzero if any combo failed.
 The matrix is upgrade-direction only because pgcopydb needs `pg_dump` at least at the target's major and a newer major's dump does not restore into an older server.
-PG14 and PG15 appear as sources only, because the runner's `pg_restore` 18 cannot restore into a target older than PostgreSQL 17 ([docs/reference/prerequisites.md](docs/reference/prerequisites.md#client-tool-versions)).
+PG14 appears as a source only because the suite needs a PostgreSQL 15 or later target for follow mode.
+The runner selects PostgreSQL 16 client tools for targets through 16 and version 18 tools for targets 17 and 18.
+See [Client tool versions](docs/reference/prerequisites.md#client-tool-versions).
 
 When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suite creates and capacity-checks its ephemeral StorageClass; release callers that supply an existing class through the override use that class and skip suite-owned setup and capacity checking.
 The suite-owned class uses one Longhorn replica: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.

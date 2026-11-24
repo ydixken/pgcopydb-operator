@@ -46,7 +46,8 @@ Individual checks appear as `ok:` log lines.
    But preflight does not check the declared scope against your intent.
 2. Partial.
    Preflight checks the selected extensions and their target ownership.
-   It fails when the runner's `pg_restore` is 17 or later and the target runs PostgreSQL 16 or older (see [`pg_restore` and the target major](reference/prerequisites.md#pg_restore-and-the-target-major)).
+   It fails when the actual `pg_restore` is 17 or later and the target runs PostgreSQL 16 or older.
+   The default runner selects version 16 for those targets (see [`pg_restore` and the target major](reference/prerequisites.md#pg_restore-and-the-target-major)).
    It does not check extension versions, package installation, installation privileges, collations, encodings, or wider source-to-target compatibility.
    It does not check server-version equality, unless you set `spec.preflight.requireSameMajorVersion`.
    That setting compares only the major versions.

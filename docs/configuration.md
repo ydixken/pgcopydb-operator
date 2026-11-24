@@ -313,7 +313,7 @@ The preference is not a requirement: if that node is full or not available, the 
 
 ## Runner image
 
-The worker Jobs run the operator-wide runner image from the chart value `runner.image`: pgcopydb 0.18 with PostgreSQL 18 client tools.
+The worker Jobs run the operator-wide runner image from the chart value `runner.image`: pgcopydb 0.18 with PostgreSQL 16 and 18 client tools.
 `spec.runner` overrides it per Migration, together with pod placement and resources:
 
 ```yaml
@@ -324,9 +324,10 @@ spec:
       requests: {cpu: "2", memory: 4Gi}
 ```
 
-The `pg_restore` 18 of the default image cannot restore into PostgreSQL 16 or older.
-Such a target needs a `spec.runner.image` whose `pg_restore` is version 16 or older.
-The version of `pg_dump` in the image must be at least the major version of the target.
+The default image selects PostgreSQL 16 client tools for targets through version 16 and version 18 tools for targets 17 and 18.
+The selected `pg_dump`/`pg_restore` must be at least the major version of both source and target.
+Preflight checks this before a migration starts.
+Targets newer than PostgreSQL 18, or sources newer than the selected client, need a custom `spec.runner.image` with compatible tools.
 See [client tool versions](reference/prerequisites.md#client-tool-versions).
 
 If you do not set `resources`, the default is 4 CPUs and 4Gi, as requests only.

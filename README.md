@@ -51,7 +51,7 @@ config/                    # kubebuilder-generated kustomize tree
 docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml)
 docs/examples/             # Migration resources with short explanations
 images/pgcopydb-builder/   # publishes the pgcopydb binary the runner image copies in, keyed on its source commit
-images/runner/             # worker image: pgcopydb + PostgreSQL 18 client tools, stripped of what it never runs
+images/runner/             # worker image: pgcopydb + PostgreSQL 16/18 client tools, stripped of what it never runs
 test/e2e/                  # e2e suite: local runs and release candidate CI
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
 .github/workflows/         # CI, weekly candidate and manual promotion, ghcr publish, docs deploy, GitLab mirror, Artifact Hub metadata

@@ -1,10 +1,13 @@
 # Runner image
 
 Image for the migration Jobs the operator spawns.
-It contains pgcopydb 0.18, patched and copied in from a separate image (see below), and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql) from the PGDG apt repo on `debian:trixie-slim`.
-It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles postgresql-client-16 and a passwordless-sudo user: pg_dump/pg_restore MUST be at least the target's major version, and PGDG trixie ships postgresql-client-18 for both amd64 and arm64.
+It contains pgcopydb 0.18, patched and copied in from a separate image (see below), and PostgreSQL 16 and 18 client tools from the PGDG apt repo on `debian:trixie-slim`.
+The wrappers select client 16 for targets through PostgreSQL 16, and client 18 for targets 17 and 18.
+`psql` remains version 18 in both tool directories so pgcopydb's discovery and the operator's PgBouncer check use the required client.
+Preflight checks that the selected `pg_dump`/`pg_restore` version is at least both the source and target major.
+Targets newer than PostgreSQL 18, or sources newer than the selected client, need a custom runner image.
 `pg_restore` 17 and later MUST NOT restore into a target older than PostgreSQL 17, because they send `SET transaction_timeout = 0` on every target connection and those servers reject it.
-This image's targets MUST therefore run PostgreSQL 17 or later; see [`pg_restore` and the target major](../../docs/reference/prerequisites.md#pg_restore-and-the-target-major).
+See [client tool versions](../../docs/reference/prerequisites.md#client-tool-versions) and [`pg_restore` and the target major](../../docs/reference/prerequisites.md#pg_restore-and-the-target-major).
 
 ## Why pgcopydb comes from a fork
 
