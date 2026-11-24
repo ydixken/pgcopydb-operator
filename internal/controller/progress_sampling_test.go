@@ -380,8 +380,8 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
 			ContainSubstring(reasonTablesEmptyOnTarget), ContainSubstring("public.documents"))))
 
-		// The marker scrolls out of the bounded tail and the sampler misses a
-		// pass: the refusal stands on its own, and is not announced again.
+		// The marker is no longer in the returned log window and the sampler
+		// misses a pass: the refusal stands on its own, and is not announced again.
 		logs.tsOut = copyingLine
 		fake.setRelations(nil)
 		got = reconcileAndGet(ctx, r, name)
@@ -393,6 +393,43 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		got = reconcileAndGet(ctx, r, name)
 		Expect(cloneCondition(got).Reason).To(Equal("BaseCopyDone"))
 		Expect(got.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+	})
+
+	It("keeps a clone marker latched when the sample fails and the marker leaves the log window", func() {
+		const name = "mig-clone-marker-latched"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{sizesErr: errors.New("sample unavailable")}
+		sent := &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		logs := cloneDoneLogs()
+		r := newReconciler()
+		r.Progress, r.Sentinel, r.Logs = fake, sent, logs
+		m := followMigration(name)
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverManual}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+
+		got := reconcileAndGet(ctx, r, name)
+		c := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionCloneCompleted)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(reasonCloneMarkerSeen))
+		Expect(got.Status.WorkerLogCursor).NotTo(BeNil())
+		Expect(got.Status.WorkerLogCursor.LastTimestamp).NotTo(BeNil())
+
+		// A fresh reconciler has no in-memory state, and the next log window no
+		// longer contains the marker. The persisted condition and timestamp cursor
+		// still trigger the confirming sample.
+		logs.tsOut = copyingLine
+		fake.sizesErr = nil
+		r2 := newReconciler()
+		r2.Progress, r2.Sentinel, r2.Logs = fake, sent, logs
+		got = reconcileAndGet(ctx, r2, name)
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(logs.lastSince).NotTo(BeNil())
+		Expect(logs.lastPreviousPodUID).To(Equal(got.Status.WorkerLogCursor.PodUID))
 	})
 
 	It("does not wait for rows in a table whose data the clone skips", func() {

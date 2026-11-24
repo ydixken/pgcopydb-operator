@@ -17,8 +17,12 @@ limitations under the License.
 package pgcopydb
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -229,6 +233,51 @@ const (
 func CloneDone(raw []byte) bool {
 	return bytes.Contains(raw, []byte(markerSentinelApply)) ||
 		bytes.Contains(raw, []byte(markerAllStepsDone))
+}
+
+// WorkerLogScan summarizes a timestamped log stream without retaining its body.
+type WorkerLogScan struct {
+	LastTimestamp     *time.Time
+	CloneDone         bool
+	SupervisorDeathAt *time.Time
+}
+
+// ScanWorkerLogs scans timestamped pod logs and returns the markers and newest
+// runtime timestamp. The reader keeps memory bounded to one log line.
+func ScanWorkerLogs(raw io.Reader) (WorkerLogScan, error) {
+	var scan WorkerLogScan
+	if raw == nil {
+		return scan, errors.New("worker log stream is nil")
+	}
+
+	reader := bufio.NewReader(raw)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			if strings.Contains(line, markerSentinelApply) || strings.Contains(line, markerAllStepsDone) {
+				scan.CloneDone = true
+			}
+			if stamp, _, ok := strings.Cut(line, " "); ok {
+				if timestamp, parseErr := time.Parse(time.RFC3339Nano, stamp); parseErr == nil {
+					if scan.LastTimestamp == nil || timestamp.After(*scan.LastTimestamp) {
+						scan.LastTimestamp = &timestamp
+					}
+					if scan.SupervisorDeathAt == nil && supervisorDeathLine(line) {
+						scan.SupervisorDeathAt = &timestamp
+					}
+				}
+			}
+		}
+
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, io.EOF):
+			return scan, nil
+		default:
+			return WorkerLogScan{}, fmt.Errorf("read worker log stream: %w", err)
+		}
+	}
 }
 
 // Supervisor-death markers, both proven live on pgcopydb 0.18 in follow mode

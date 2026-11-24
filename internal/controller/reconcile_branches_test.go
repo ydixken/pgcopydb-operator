@@ -327,7 +327,7 @@ var _ = Describe("Migration Controller resilience", func() {
 	})
 
 	// supervisorDeathAt renders the proven pgcopydb 0.18 supervisor-death
-	// line the way JobLogsTimestamps returns it: runtime stamp, space, JSON.
+	// line the way the timestamped pod-log stream returns it: runtime stamp, space, JSON.
 	supervisorDeathAt := func(ts time.Time) string {
 		return ts.UTC().Format(time.RFC3339Nano) +
 			` {"timestamp":"t","pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n"
@@ -363,6 +363,8 @@ var _ = Describe("Migration Controller resilience", func() {
 
 		r := newReconciler()
 		r.Sentinel = fake
+		now := time.Now()
+		r.now = func() time.Time { return now }
 		logs := &fakeLogs{}
 		r.Logs = logs
 		rec := r.Recorder.(*events.FakeRecorder)
@@ -375,7 +377,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		// Freshly logged marker: the first sighting must not kill the pod,
 		// because an ordinary failure shutdown looks identical for a few
 		// seconds before the Job fails on its own.
-		logs.tsOut = supervisorDeathAt(time.Now())
+		logs.tsOut = supervisorDeathAt(now)
 		reconcileAndGet(ctx, r, name)
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: testNS}, pod)).To(Succeed())
 		Expect(pod.DeletionTimestamp.IsZero()).To(BeTrue())
@@ -383,7 +385,7 @@ var _ = Describe("Migration Controller resilience", func() {
 
 		// The marker has now stood longer than the worker's termination
 		// grace and the Job is still active: that is the zombie, the pod goes.
-		logs.tsOut = supervisorDeathAt(time.Now().Add(-2 * zombieGrace))
+		now = now.Add(2 * zombieGrace)
 		reconcileAndGet(ctx, r, name)
 		// envtest has no kubelet to finish a pod delete; the deletion
 		// timestamp is the observable "being deleted", as in the suspend test.

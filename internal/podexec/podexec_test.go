@@ -19,6 +19,7 @@ package podexec
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/streaming/pkg/httpstream/wsstream"
 )
@@ -137,7 +139,8 @@ func workerPod(name string, created time.Time) corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         "ns",
-			Labels:            map[string]string{"job-name": "mig-run-1"},
+			UID:               types.UID("pod-" + name),
+			Labels:            map[string]string{"job-name": "mig-run-1", "batch.kubernetes.io/controller-uid": "job-uid"},
 			CreationTimestamp: metav1.NewTime(created),
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
@@ -228,24 +231,59 @@ func TestJobLogs_PicksNewestPod(t *testing.T) {
 	}
 }
 
-// TestJobLogsTimestamps pins the one thing the variant adds: the request asks
-// the runtime to stamp every line, which is what the zombie check dates the
-// supervisor-death marker with.
-func TestJobLogsTimestamps(t *testing.T) {
+func TestJobLogStream_UsesCursorOnlyForSamePod(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	srv := newAPIServer(t)
-	srv.pods = []corev1.Pod{workerPod("mig-run-1-abc", time.Now())}
+	srv.pods = []corev1.Pod{
+		workerPod("attempt-old", base),
+		workerPod("attempt-newest", base.Add(time.Minute)),
+	}
 	e := newExec(t, srv.URL)
+	since := metav1.NewTime(base)
 
-	out, err := e.JobLogsTimestamps(context.Background(), "ns", "mig-run-1", 7)
+	stream, podUID, err := e.JobLogStream(context.Background(), "ns", "mig-run-1", "job-uid", "pod-attempt-newest", &since)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != podLog {
-		t.Fatalf("logs = %q", out)
+	defer stream.Close() //nolint:errcheck
+	out, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if string(out) != podLog || podUID != "pod-attempt-newest" {
+		t.Fatalf("stream = %q, pod UID = %q", out, podUID)
+	}
+	req := srv.lastRequest(t)
+	if !strings.HasSuffix(req.Path, "/pods/attempt-newest/log") {
+		t.Fatalf("logs fetched from %q, want newest pod", req.Path)
+	}
+	q := req.Query()
+	if q.Get("timestamps") != paramTrue || q.Get("container") != runnerContainer ||
+		q.Get("tailLines") != "" || q.Get("sinceTime") != base.Add(-time.Second).Format(time.RFC3339) {
+		t.Fatalf("log query = %v, want timestamps, container, one-second overlap, and no tail limit", q)
+	}
+	if len(srv.requests) < 2 {
+		t.Fatal("expected a pod-list request before the log stream request")
+	}
+	if got := srv.requests[0].Query().Get("labelSelector"); got != "batch.kubernetes.io/controller-uid=job-uid" {
+		t.Fatalf("pod selector = %q, want Job UID selector", got)
+	}
+}
+
+func TestJobLogStream_NewPodStartsAtBeginning(t *testing.T) {
+	srv := newAPIServer(t)
+	srv.pods = []corev1.Pod{workerPod("attempt-new", time.Now())}
+	e := newExec(t, srv.URL)
+	since := metav1.Now()
+
+	stream, _, err := e.JobLogStream(context.Background(), "ns", "mig-run-1", "job-uid", "old-pod-uid", &since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close() //nolint:errcheck
 	q := srv.lastRequest(t).Query()
-	if q.Get("timestamps") != paramTrue || q.Get("tailLines") != "7" {
-		t.Fatalf("log query = %v, want timestamps=true tailLines=7", q)
+	if q.Get("sinceTime") != "" || q.Get("tailLines") != "" {
+		t.Fatalf("new pod log query = %v, want full log from pod start", q)
 	}
 }
 

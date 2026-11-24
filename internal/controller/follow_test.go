@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -195,16 +196,20 @@ func (c failingPatchClient) Patch(context.Context, client.Object, client.Patch, 
 
 // fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
 // sentinel: tests choose what a pod "logged". out/err serve JobLogs, tsOut
-// and tsErr the timestamped variant the zombie check reads.
+// and tsErr serve the timestamped worker log stream used for follow checks.
 type fakeLogs struct {
 	out string
 	err error
 	// byJob replaces out for the Jobs it names.
 	byJob map[string]string
 	// byUID alone serves JobLogsByUID; a missing UID reads as a Job without pods.
-	byUID map[types.UID]string
-	tsOut string
-	tsErr error
+	byUID              map[types.UID]string
+	tsOut              string
+	tsErr              error
+	streamPodUID       types.UID
+	streamCalls        int
+	lastPreviousPodUID types.UID
+	lastSince          *metav1.Time
 	// gotLines records the last requested tail budget, so tests can prove
 	// the success-path parse asks for the whole log.
 	gotLines int64
@@ -229,8 +234,23 @@ func (f *fakeLogs) JobLogsByUID(_ context.Context, _ string, uid types.UID, _ in
 	return []byte(out), nil
 }
 
-func (f *fakeLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]byte, error) {
-	return []byte(f.tsOut), f.tsErr
+func (f *fakeLogs) JobLogStream(
+	_ context.Context,
+	_, jobName string,
+	_, previousPodUID types.UID,
+	since *metav1.Time,
+) (io.ReadCloser, types.UID, error) {
+	f.streamCalls++
+	f.lastPreviousPodUID = previousPodUID
+	f.lastSince = since
+	if f.tsErr != nil {
+		return nil, "", f.tsErr
+	}
+	podUID := f.streamPodUID
+	if podUID == "" {
+		podUID = types.UID(jobName + "-pod")
+	}
+	return io.NopCloser(strings.NewReader(f.tsOut)), podUID, nil
 }
 
 // The worker log is where the operator reads the end of the base copy, so a
