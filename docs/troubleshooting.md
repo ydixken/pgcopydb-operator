@@ -266,19 +266,22 @@ See [Synchronous commit on the target](configuration.md#synchronous-commit-on-th
 
 ### The runner's `pg_restore` cannot restore into the target
 
-`PreflightFailed` with `the runner's pg_restore <n> cannot restore into the target's PostgreSQL <m>` means that the runner's `pg_restore` is version 17 or later, and that the target runs PostgreSQL 16 or older.
+`PreflightFailed` with `the runner's pg_restore <n> cannot restore into the target's PostgreSQL <m>` means that the actual `pg_restore` is version 17 or later, and that the target runs PostgreSQL 16 or older.
 `pg_restore` 17 and later send `SET transaction_timeout = 0`.
 Those servers reject it with `unrecognized configuration parameter "transaction_timeout"`, so every worker attempt would fail at the pre-data restore.
-The default runner ships `pg_restore` 18.
+The default runner selects `pg_restore` 16 for targets through PostgreSQL 16, so this message usually means a custom runner or `PG_CONFIG` selected newer tools.
 
-Use a target that runs PostgreSQL 17 or later.
-Alternatively, set `spec.runner.image` to an image whose `pg_restore` is version 16 or older, as [Client tool versions](reference/prerequisites.md#client-tool-versions) describes.
+The default runner already supports targets through PostgreSQL 16.
+For a custom runner, use `pg_restore` 16 or older for those targets.
+See [Client tool versions](reference/prerequisites.md#client-tool-versions).
 Then create a new Migration.
 
 `cannot read the major version of the runner's pg_restore` also fails, because we never read an unknown version as a compatible one.
 The message names the binary that preflight ran.
 A custom image produces this message when its `pg_restore` is missing at that path or prints an unexpected `--version` line.
 `cannot read the target major version for the pg_restore check` means that the target's `server_version_num` query failed after the connectivity test passed.
+`the runner's pg_dump <n> is older than source PostgreSQL <m>` or `the runner's pg_restore <n> is older than target PostgreSQL <m>` means a custom image's tools cannot support those server versions.
+Use a runner with tools at least as new as both endpoints.
 
 ## Extension ownership failures
 
@@ -916,11 +919,11 @@ Wait for garbage collection to finish, or delete the leftover objects.
 
 ### `pg_dump` reports a server version mismatch
 
-`pg_dump: error: server version mismatch` in the logs means that the client tools in the runner image are older than a server major.
-`pg_dump` must be at least the newest major on either side.
+`pg_dump: error: server version mismatch` in the logs means that the client tools in the runner image are older than the source or target major.
+`pg_dump`/`pg_restore` must be at least the newest major on either side.
+The default runner selects tools by target. Preflight compares the selected client with both endpoint versions.
 
-If you pinned `spec.runner.image`, point it at an image with matching client tools.
-The default runner ships PostgreSQL 18 client tools.
+If you pinned `spec.runner.image`, point it at an image with client tools at least as new as both endpoints.
 
 ### No worker pod and the PVC stays Pending
 

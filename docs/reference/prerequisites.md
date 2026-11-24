@@ -46,18 +46,20 @@ See [All databases](#all-databases).
 ## Client tool versions
 
 The runner image bundles pgcopydb and the PostgreSQL client tools.
-`pg_dump`/`pg_restore` MUST be at least the target server's major version.
+`pg_dump`/`pg_restore` MUST be at least the source and target server major versions.
+The default runner contains PostgreSQL 16 and 18 client tools.
+It selects version 16 for a target through PostgreSQL 16, and version 18 for a target on PostgreSQL 17 or 18.
 `pg_restore` 17 or later MUST NOT restore into a target older than PostgreSQL 17.
-The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools, so its target MUST run PostgreSQL 17 or later.
 
 > [!warning]
-> The default runner cannot clone into PostgreSQL 16 or older.
-> Its `pg_restore` sends `SET transaction_timeout = 0` on every target connection.
-> Those servers reject that setting, so every attempt fails at the pre-data restore.
-> Preflight fails such a Migration with the [`pg_restore` check](#pg_restore-and-the-target-major).
+> A PostgreSQL 17-or-later `pg_restore` cannot restore into PostgreSQL 16 or older: it sends
+> `SET transaction_timeout = 0` on every target connection, and those servers reject it.
+> The default runner selects `pg_restore` 16 for those targets. Preflight checks the actual
+> selected binary and fails closed if it is too old for either endpoint or too new for the target.
+> See the [`pg_restore` check](#pg_restore-and-the-target-major).
 
-For a newer target major, set `spec.runner.image` to an image with client tools for that major version.
-For a PostgreSQL 16 or older target, set it to an image whose `pg_restore` is version 16 or older.
+For a target newer than PostgreSQL 18, set `spec.runner.image` to an image with client tools for that major version.
+The `pg_dump`/`pg_restore` major must also be at least the source major.
 pgcopydb takes `pg_dump` and `pg_restore` from one directory.
 When `PG_CONFIG` names a file, it is the directory that holds the `psql` in `$PG_CONFIG --bindir`.
 Otherwise, it is the directory that holds the first `psql` on `PATH`.
@@ -525,7 +527,10 @@ spec:
 
 ### `pg_restore` and the target major
 
-Preflight fails when the runner's `pg_restore` is version 17 or later and the target runs PostgreSQL 16 or older.
+Preflight selects PostgreSQL 16 tools for targets through 16 and PostgreSQL 18 tools for targets 17 and 18.
+It checks the selected client against both source and target majors.
+A client older than either endpoint fails preflight.
+It also fails when the actual runner's `pg_restore` is version 17 or later and the target runs PostgreSQL 16 or older.
 `pg_restore` 17 and later send `SET transaction_timeout = 0` on every target connection, without a check of the server version.
 A server older than 17 rejects the setting.
 pgcopydb then fails the pre-data restore on every attempt, before it copies any data, so retries never converge.
@@ -539,7 +544,8 @@ The target's major comes from `server_version_num`, as in the [major version gat
 When preflight cannot parse the version output, or cannot read the target major, the check fails instead of passing.
 A failed check stops preflight, so its line is the line that preflight reports.
 
-Use a PostgreSQL 17 or later target, or a custom `spec.runner.image` whose `pg_restore` is version 16 or older.
+The default runner handles targets through PostgreSQL 16 with client 16.
+For a target newer than PostgreSQL 18, or a source newer than the selected client, use a custom `spec.runner.image` with compatible client tools.
 
 ## All databases
 

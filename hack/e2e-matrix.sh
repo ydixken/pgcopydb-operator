@@ -2,12 +2,12 @@
 # Sequential PG version-matrix e2e runs; invoked by `task e2e:matrix`, which
 # holds the single confirmation prompt. Runs against the CURRENT kubectl
 # context, so never call this directly against a cluster you did not intend.
-# Upgrade-direction only: pg_dump must be at least the target's major, and a
-# newer major's dump does not restore into an older server. Targets are 17 or
-# later: the runner's pg_restore 18 fails on older ones (docs/reference/prerequisites.md).
+# Upgrade-direction only: pg_dump must support both endpoints, and a newer
+# major's dump does not restore into an older server. Follow mode needs targets
+# on PostgreSQL 15 or later. The runner selects client tools by target major.
 set -u
 
-combos="14:18 18:18 15:17"
+combos="14:18 18:18 14:16 15:17"
 last="15:17"
 summary=""
 failed=0

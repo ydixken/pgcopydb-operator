@@ -47,9 +47,9 @@ It does not tell you anything about your own data.
   On the target, 3 free replication origins.
   The suite runs one follow migration at a time, and the WAL workers spec needs this much room for its 3 workers.
   External mode runs as one Ginkgo process and refuses `ginkgo --procs` above 1, because it has one database pair.
-- A target on PostgreSQL 17 or later, not older than the source.
+- A target on PostgreSQL 15 or later, not older than the source.
   The source may be PostgreSQL 14 or later.
-  The runner's `pg_restore` 18 cannot restore into PostgreSQL 16 or older ([Client tool versions](../reference/prerequisites.md#client-tool-versions)).
+  The runner selects client tools for the target major ([Client tool versions](../reference/prerequisites.md#client-tool-versions)).
 - The `citext` and `hstore` extensions available on both servers (PostgreSQL contrib).
 - An `sslmode` of `disable`, `allow`, `prefer`, or `require`.
   `verify-ca` and `verify-full` are not supported, because the suite cannot pass a CA certificate.

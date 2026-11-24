@@ -1383,7 +1383,7 @@ func TestPreflightScript_DeferIndexes(t *testing.T) {
 	toFooter := preflightScriptFor(m)
 	const (
 		accepted  = "ok: runner pgcopydb accepts --defer-indexes"
-		restoreOK = restoreMajorOK + "16 restores into target major 16"
+		restoreOK = restoreMajorOK + "16 support source major 16 and target major 16"
 		before    = "  --skip-db-properties          Skip copying ALTER DATABASE SET properties\n"
 		after     = "  --requirements <filename>     List extensions requirements\n"
 		failure   = "preflight: spec.clone.deferIndexes needs pgcopydb 0.18.136.gb42f560 or later," +
@@ -1578,16 +1578,25 @@ func TestPreflightScript_WalWorkersLive(t *testing.T) {
 }
 
 const (
-	restoreMajorOK     = "ok: runner pg_restore "
+	restoreMajorOK     = "ok: runner pg_dump and pg_restore "
 	restoreMajorUnread = "preflight: cannot read the major version of the runner's pg_restore"
 )
 
-// restoreMajorFailure is the pg_restore gate's verdict for the given majors.
+// restoreMajorFailure is the pg_restore transaction_timeout gate's verdict.
 func restoreMajorFailure(target, restore string) string {
 	return "preflight: the runner's pg_restore " + restore + " cannot restore into the target's PostgreSQL " + target +
 		": pg_restore 17 and later send SET transaction_timeout = 0, which PostgreSQL 16 and older reject," +
 		" so every attempt fails at the pre-data restore; use a PostgreSQL 17 or later target," +
 		" or a custom spec.runner.image whose pg_restore major is not newer than 16"
+}
+
+func restoreSourceMajorFailure(source, restore string) string {
+	return "preflight: the runner's pg_dump " + restore + " is older than source PostgreSQL " + source +
+		" and cannot dump it"
+}
+
+func restoreTargetMajorFailure(target, restore string) string {
+	return "preflight: the runner's pg_restore " + restore + " is older than target PostgreSQL " + target
 }
 
 // TestPreflightScriptFor_RestoreMajor pins the pg_restore gate on both paths,
@@ -1630,6 +1639,7 @@ func TestPreflightScript_RestoreMajor(t *testing.T) {
 		{"target 15 fails", restoreVersion18, "15", restoreMajorFailure("15", "18")},
 		{"pg_restore 17 into target 16 fails", "pg_restore (PostgreSQL) 17.10 (Debian 17.10-1.pgdg12+1)", "16",
 			restoreMajorFailure("16", "17")},
+		{"client older than target fails", restoreVersion16, "17", restoreTargetMajorFailure("17", "16")},
 		{"an unreadable target fails closed", restoreVersion18, "",
 			"preflight: cannot read the target major version for the pg_restore check"},
 		// Without the digit filter, [ abc -lt 17 ] errors and the gate would pass open.
@@ -1641,10 +1651,26 @@ func TestPreflightScript_RestoreMajor(t *testing.T) {
 			failsWith(t, out, code, tc.want)
 		})
 	}
+	t.Run("client older than source fails", func(t *testing.T) {
+		out, code := gate(t, restoreVersion16, "16", "SRC_MAJOR=17")
+		failsWith(t, out, code, restoreSourceMajorFailure("17", "16"))
+	})
+	t.Run("unreadable source fails closed", func(t *testing.T) {
+		out, code := gate(t, restoreVersion16, "16", "SRC_MAJOR=")
+		failsWith(t, out, code, "preflight: cannot read the source major version for the pg_dump check")
+	})
+	t.Run("non-numeric source fails closed", func(t *testing.T) {
+		out, code := gate(t, restoreVersion16, "16", "SRC_MAJOR=unknown")
+		failsWith(t, out, code, "preflight: cannot read the source major version for the pg_dump check")
+	})
+	t.Run("target newer than bundled client fails", func(t *testing.T) {
+		out, code := gate(t, restoreVersion18, "19")
+		failsWith(t, out, code, restoreTargetMajorFailure("19", "18"))
+	})
 	for _, tc := range []struct{ name, restore, target, ok string }{
-		{"target 17 passes", restoreVersion18, "17", "18 restores into target major 17"},
-		{"target 18 passes", restoreVersion18, "18", "18 restores into target major 18"},
-		{"pg_restore 16 with target 16 passes", restoreVersion16, "16", "16 restores into target major 16"},
+		{"target 17 passes", restoreVersion18, "17", "18 support source major 16 and target major 17"},
+		{"target 18 passes", restoreVersion18, "18", "18 support source major 16 and target major 18"},
+		{"pg_restore 16 with target 16 passes", restoreVersion16, "16", "16 support source major 16 and target major 16"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, code := gate(t, tc.restore, tc.target)
@@ -1654,7 +1680,7 @@ func TestPreflightScript_RestoreMajor(t *testing.T) {
 		})
 	}
 	t.Run("garbage version output fails closed", func(t *testing.T) {
-		// A PostgreSQL 17 target takes any pg_restore, so only the parse can fail.
+		// Keep the target valid so only the pg_restore version parse can fail.
 		for _, garbage := range []string{"garbage", "", "psql (PostgreSQL) 18.6", "pg_restore (PostgreSQL) devel",
 			restoreVersion16 + "\n" + restoreVersion18} {
 			out, code := gate(t, garbage, "17")
@@ -1672,7 +1698,7 @@ func TestPreflightScript_RestoreMajor(t *testing.T) {
 		write("psql", "echo 'psql (PostgreSQL) 16.10'")
 		write("pg_restore", "echo '"+restoreVersion16+"'")
 		out, code := gate(t, restoreVersion18, "16", "PG_CONFIG="+filepath.Join(bin, "pg_config"))
-		if code != 0 || !strings.Contains(out, restoreMajorOK+"16 restores into target major 16") {
+		if code != 0 || !strings.Contains(out, restoreMajorOK+"16 support source major 16 and target major 16") {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 		// pgcopydb ignores a PG_CONFIG that names no file and takes the directory of the first psql.
@@ -1694,7 +1720,7 @@ func TestPreflightScript_RestoreMajor(t *testing.T) {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 		out, code, _, _ = runAll(t, m, "PG_RESTORE_VERSION="+restoreVersion18, "TGT_MAJOR=17")
-		if code != 0 || !strings.Contains(out, restoreMajorOK+"18 restores into target major 17") {
+		if code != 0 || !strings.Contains(out, restoreMajorOK+"18 support source major 16 and target major 17") {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
@@ -3067,7 +3093,7 @@ case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
   '\conninfo') printf 'Backend PID|4711\n4711\n' ;;
-  *server_version_num*) echo "${TGT_MAJOR-16}" ;;
+  *server_version_num*) case "$uri" in src*) echo "${SRC_MAJOR-16}" ;; *) echo "${TGT_MAJOR-16}" ;; esac ;;
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
   *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]'|'["extension citext (owner postgres, migration role limited)"]') echo 1 ;; *) echo -1 ;; esac ;;

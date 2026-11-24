@@ -1,9 +1,9 @@
 # Runner image for the operator's migration Jobs: the forked pgcopydb 0.18
-# plus the PostgreSQL 18 client tools, on debian:trixie-slim with the PGDG apt
-# repo. pg_dump/pg_restore MUST be >= the newest server major on either side,
-# and pg_restore 17+ MUST NOT restore into a pre-17 target. pgcopydb comes from
-# the pgcopydb-builder image, not PGDG, and the install purges what a migration
-# never runs. images/runner/README.md says why, and why not Alpine or Wolfi.
+# plus PostgreSQL 16 and 18 client tools, on debian:trixie-slim with the PGDG
+# apt repo. The selector uses client 16 for targets through PostgreSQL 16 and
+# client 18 for newer targets. psql stays at 18 for the PgBouncer preflight.
+# pgcopydb comes from the pgcopydb-builder image, not PGDG, and the install
+# purges what a migration never runs. images/runner/README.md explains why.
 
 # Pinned by tag and digest, not just tag: a debian bump inside the
 # builder republishes this same tag, so only the digest stops that
@@ -30,11 +30,16 @@ RUN set -eux; \
     curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
-    # Client 18 dumps sources back to 9.2 but restores only into targets on
-    # 17 or later, the servers that accept the SET transaction_timeout it sends.
-    # libgc1 is the one library the fork-built pgcopydb links beyond
-    # postgresql-client-18's libpq5.
-    apt-get install -y --no-install-recommends postgresql-client-18 libgc1; \
+    # Client 16 restores into targets older than 17. Client 18 handles targets
+    # from 17 onward. The selector keeps psql at 18 for the PgBouncer check.
+    # libgc1 is the one library the fork-built pgcopydb links beyond libpq5.
+    apt-get install -y --no-install-recommends postgresql-client-16 postgresql-client-18 libgc1; \
+    install -d /opt/pgtools/16 /opt/pgtools/18 /usr/local/lib/pgcopydb; \
+    cp /usr/lib/postgresql/16/bin/pg_dump /usr/lib/postgresql/16/bin/pg_dumpall \
+       /usr/lib/postgresql/16/bin/pg_restore /usr/lib/postgresql/18/bin/psql /opt/pgtools/16/; \
+    cp /usr/lib/postgresql/18/bin/pg_dump /usr/lib/postgresql/18/bin/pg_dumpall \
+       /usr/lib/postgresql/18/bin/pg_restore /usr/lib/postgresql/18/bin/psql /opt/pgtools/18/; \
+    cp /usr/lib/postgresql/18/bin/psql /opt/pgtools/; \
     # curl was build-time only; drop it to shrink the attack surface
     apt-get purge -y --auto-remove curl; \
     # Everything below runs in this layer on purpose: files deleted in a later
@@ -58,15 +63,18 @@ RUN set -eux; \
       libuuid1 login mount ncurses-bin util-linux; \
     rm -rf /var/lib/apt/lists/*
 
-# The fork-built binary lands next to the version-18 client tools, so the
-# PATH below covers it too.
-COPY --from=pgcopydb /pgcopydb /usr/lib/postgresql/18/bin/pgcopydb
+# The runner selector sets PATH to the client directory that matches the
+# target before it starts this binary.
+COPY --from=pgcopydb /pgcopydb /usr/local/lib/pgcopydb/pgcopydb
+COPY images/runner/client-selector.sh /usr/local/bin/runner-client-selector
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/runner-client-selector; \
+    ln -s /usr/local/bin/runner-client-selector /opt/pgtools/pgcopydb; \
+    ln -s /usr/local/bin/runner-client-selector /opt/pgtools/pg_dump; \
+    ln -s /usr/local/bin/runner-client-selector /opt/pgtools/pg_restore
 
-# Version-18 binaries ahead of Debian's pg_wrapper, so pg_dump and pg_restore
-# resolve to 18.x deterministically even if another client major lands later.
-# With postgresql-client-common purged the wrappers are gone entirely, which
-# makes this the only path to the client tools.
-ENV PATH=/usr/lib/postgresql/18/bin:$PATH
+# The selector wrappers and psql 18 come before the rest of the system tools.
+ENV PATH=/opt/pgtools:$PATH
 
 # Purging packages can break the remaining tools through shared libraries.
 # Run the worker, credential escaping, and sampler timeout after purging so
@@ -76,10 +84,27 @@ RUN set -eux; \
     pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF 'Build indexes once all table data is copied'; \
     pgcopydb clone --help 2>&1 | grep -qF -- '--wal-workers'; \
     # No flag or help text shows the compare data progress lines, so look for their text.
-    grep -qF 'compare progress: ' "$(command -v pgcopydb)"; \
+    grep -qF 'compare progress: ' /usr/local/lib/pgcopydb/pgcopydb; \
     pg_dump --version | grep -qE ' 18\.'; \
-    pg_restore --version >/dev/null; \
-    psql --version >/dev/null; \
+    pg_restore --version | grep -qE ' 18\.'; \
+    psql --version | grep -qE ' 18\.'; \
+    /opt/pgtools/16/pg_dump --version | grep -qE ' 16\.'; \
+    /opt/pgtools/16/pg_restore --version | grep -qE ' 16\.'; \
+    /opt/pgtools/16/psql --version | grep -qE ' 18\.'; \
+    /opt/pgtools/18/pg_dump --version | grep -qE ' 18\.'; \
+    /opt/pgtools/18/pg_restore --version | grep -qE ' 18\.'; \
+    mkdir -p /tmp/runner-selector-test; \
+    printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$TEST_TARGET_MAJOR"' > /tmp/runner-selector-test/psql; \
+    chmod 0755 /tmp/runner-selector-test/psql; \
+    rm -f /tmp/pgcopydb-client-major; \
+    TEST_TARGET_MAJOR=16 PGCOPYDB_TARGET_PGURI=target \
+      PATH="/tmp/runner-selector-test:/opt/pgtools:$PATH" \
+      pg_restore --version | grep -qE ' 16\.'; \
+    rm -f /tmp/pgcopydb-client-major; \
+    TEST_TARGET_MAJOR=17 PGCOPYDB_TARGET_PGURI=target \
+      PATH="/tmp/runner-selector-test:/opt/pgtools:$PATH" \
+      pg_restore --version | grep -qE ' 18\.'; \
+    rm -rf /tmp/runner-selector-test /tmp/pgcopydb-client-major; \
     timeout --version | grep -qF 'GNU coreutils'; \
     timeout --signal=TERM --kill-after=1s 6s true; \
     sed --version | grep -qF 'GNU sed'; \
