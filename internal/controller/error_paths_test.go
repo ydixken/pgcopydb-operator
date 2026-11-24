@@ -420,7 +420,7 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 		t.Fatalf("follow done cursor = %v, want retained %v", got, firstAt.Add(time.Second))
 	}
 
-	logs.streamPodUID = "replacement-pod"
+	logs.streamPodUID = replacementPodUID
 	replacementAt := firstAt.Add(3 * time.Second)
 	logs.tsOut = replacementAt.Format(time.RFC3339Nano) +
 		` {"error_severity":"INFO","message":"reported write_lsn 0/6000"}` + "\n"
@@ -428,7 +428,7 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	cursor := m.Status.WorkerLogCursor
-	if cursor.PodUID != "replacement-pod" || cursor.LastTimestamp == nil ||
+	if cursor.PodUID != replacementPodUID || cursor.LastTimestamp == nil ||
 		!cursor.LastTimestamp.Time.Equal(replacementAt) || cursor.SupervisorDeathAt != nil || cursor.FollowDoneAt != nil {
 		t.Fatalf("replacement pod cursor = %+v, want fresh cursor without old marker times", cursor)
 	}

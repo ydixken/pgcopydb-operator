@@ -845,7 +845,7 @@ func (r *MigrationReconciler) reconcileCutoverStalled(m *v1beta1.Migration, job 
 			"the follow worker restarted before the endpos marker")
 		return
 	}
-	if r.currentTime().Before(cursor.FollowDoneAt.Time.Add(followWorkerExitGrace)) {
+	if r.currentTime().Before(cursor.FollowDoneAt.Add(followWorkerExitGrace)) {
 		return
 	}
 	message := "pgcopydb reached endpos, but the follow worker has not exited after 15 minutes; inspect the worker logs and database activity"

@@ -92,7 +92,8 @@ func stalledSequenceReset() {
 		stalled := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.ConditionCutoverStalled)
 		g.Expect(stalled).NotTo(BeNil())
 		g.Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(stalled.LastTransitionTime.Time.Before(current.Status.WorkerLogCursor.FollowDoneAt.Add(15 * time.Minute))).To(BeFalse())
+		earliest := current.Status.WorkerLogCursor.FollowDoneAt.Add(15 * time.Minute)
+		g.Expect(stalled.LastTransitionTime.Time.Before(earliest)).To(BeFalse())
 		g.Expect(apimeta.IsStatusConditionTrue(current.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeFalse())
 	}, 20*time.Minute, 5*time.Second).Should(Succeed())
 
@@ -344,7 +345,8 @@ func holdSQL(session, lock string) string {
 }
 
 func holdSQLFor(session, lock string, hold time.Duration) string {
-	return fmt.Sprintf("SET application_name = '%s';\nBEGIN;\n%s;\nSELECT pg_sleep(%d);\n", session, lock, int(hold.Seconds()))
+	return fmt.Sprintf("SET application_name = '%s';\nBEGIN;\n%s;\nSELECT pg_sleep(%d);\n",
+		session, lock, int(hold.Seconds()))
 }
 
 // endSessionSQL ends every session named session and prints how many it ended.

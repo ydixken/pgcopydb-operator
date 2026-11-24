@@ -50,6 +50,8 @@ const jobFailedMsg = "pod failed"
 // zero-lag stream.
 const caughtUpLSN = "0/100"
 
+const replacementPodUID = "replacement-pod"
+
 // deletionDriveTimeout bounds the Eventually loops that drive multi-pass
 // deletion flows; envtest passes are fast, this is generous.
 const deletionDriveTimeout = 15 * time.Second
@@ -660,7 +662,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		streaming := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionStreaming)
 		Expect(streaming.Status).To(Equal(metav1.ConditionFalse))
 		Expect(streaming.Reason).To(Equal(reasonFollowDone))
-		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(Equal(markerAt))
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(BeTemporally("==", markerAt))
 		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverStalled)).To(BeNil())
 		Expect(fake.callCount()).To(Equal(callCount), "the operator must stop reading or nudging the sentinel")
 		Expect(fake.nudgeCount()).To(Equal(nudgeCount))
@@ -684,7 +686,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(fake.callCount()).To(Equal(callCount))
 		logs.tsErr = nil
 
-		logs.streamPodUID = "replacement-pod"
+		logs.streamPodUID = replacementPodUID
 		logs.tsOut = now.Format(time.RFC3339Nano) +
 			` {"error_severity":"INFO","message":"replacement worker started"}` + "\n"
 		m = reconcileAndGet(ctx, r, name)
@@ -744,7 +746,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 			` {"message":"Follow mode is now done, 2 WAL workers reached endpos 0/100, lowest replay_lsn is 0/100"}` + "\n"
 		calls = fake.callCount()
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(Equal(now))
+		Expect(m.Status.WorkerLogCursor.FollowDoneAt.Time).To(BeTemporally("==", now))
 		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionStreaming).Reason).To(Equal(reasonFollowDone))
 		Expect(fake.callCount()).To(Equal(calls))
 		now = now.Add(followWorkerExitGrace)
