@@ -310,6 +310,36 @@ type workflow struct {
 	Concurrency workflowConcurrency    `json:"concurrency"`
 }
 
+func TestRunnerSelectorIsInBuildContexts(t *testing.T) {
+	copyLine := regexp.MustCompile(`(?m)^COPY\s+(\S+)\s+/usr/local/bin/runner-client-selector\s*$`)
+	match := copyLine.FindStringSubmatch(read(t, runnerDockerfile))
+	if match == nil || !filepath.IsLocal(match[1]) {
+		t.Fatal("runner Dockerfile must copy a local selector source")
+	}
+	for _, path := range []string{releaseWorkflow, "../../.github/workflows/runner-smoke.yml"} {
+		wf := mustParse(t, path)
+		found := false
+		for _, job := range wf.Jobs {
+			for _, step := range job.Steps {
+				if !strings.HasPrefix(step.Uses, "docker/build-push-action@") || step.With.Context == "" {
+					continue
+				}
+				context := filepath.Join("../..", step.With.Context)
+				if filepath.Clean(context) != filepath.Clean(filepath.Dir(runnerDockerfile)) {
+					continue
+				}
+				found = true
+				if _, err := os.Stat(filepath.Join(context, match[1])); err != nil {
+					t.Errorf("%s: selector source %q is not in the build context: %v", path, match[1], err)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s has no runner image build", path)
+		}
+	}
+}
+
 // GitHub propagates a skip down `needs`: a job whose dependency was skipped is
 // skipped too, unless its own `if` calls a status function (always, cancelled,
 // failure, success) instead of relying on the implicit success(). builder-build

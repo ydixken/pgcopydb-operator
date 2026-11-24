@@ -66,7 +66,7 @@ RUN set -eux; \
 # The runner selector sets PATH to the client directory that matches the
 # target before it starts this binary.
 COPY --from=pgcopydb /pgcopydb /usr/local/lib/pgcopydb/pgcopydb
-COPY images/runner/client-selector.sh /usr/local/bin/runner-client-selector
+COPY client-selector.sh /usr/local/bin/runner-client-selector
 RUN set -eux; \
     chmod 0755 /usr/local/bin/runner-client-selector; \
     ln -s /usr/local/bin/runner-client-selector /opt/pgtools/pgcopydb; \
