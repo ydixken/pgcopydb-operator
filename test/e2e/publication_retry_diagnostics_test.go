@@ -48,11 +48,13 @@ const (
 	publicationRetryUnavailable     = "unavailable"
 	publicationRetryWorkerContainer = "pgcopydb"
 	publicationRetryTestPod         = "worker-pod"
+	publicationRetryEventLimit      = 40
 )
 
 var (
 	publicationRetryTokenPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,79}$`)
 	publicationRetryImageDigest  = regexp.MustCompile(`sha256:[a-f0-9]{64}$`)
+	publicationRetryObjectSuffix = regexp.MustCompile(`^(?:-[a-z0-9]{1,40}){0,4}$`)
 	publicationRetrySensitive    = regexp.MustCompile(`(?i)://|password|passwd|passfile|pgpass|secret|token|` +
 		`\bdial\s+(?:tcp|udp)[46]?\b|\blookup\b.*\bno such host\b|\bcould not translate host name\b|` +
 		`\b(?:host\w*|user|dbname|port|ssl\w*|service|node|pod)\s*[=:]|` +
@@ -145,10 +147,11 @@ func publicationRetryDiagnostics(
 				publicationRetryToken(condition.Reason))
 		}
 	}
-	// The specs require exactly two attempts; never collect unrelated or unbounded Jobs.
-	for attempt := 1; attempt <= 2; attempt++ {
+	// Bounded by the fixture's retry budget; never collect unrelated or unbounded Jobs.
+	for attempt := 1; attempt <= max(2, int(mig.Spec.BackoffLimit)+1); attempt++ {
 		publicationRetryAttemptDiagnostics(diagCtx, c, command, &b, mig, attempt)
 	}
+	publicationRetryEventDiagnostics(diagCtx, c, &b, mig)
 	for _, cluster := range []string{sourceCluster, targetCluster} {
 		publicationRetrySQLDiagnostics(diagCtx, c, command, &b, cluster, table, slot)
 	}
@@ -239,6 +242,36 @@ func publicationRetryAttemptDiagnostics(
 	}
 	if owned == 0 {
 		fmt.Fprintf(b, "[WARN] attempt=%d pods unavailable: no UID-owned worker pod\n", attempt)
+	}
+}
+
+// publicationRetryEventDiagnostics lists the events of the Migration and its objects, so a worker
+// pod deleted from outside or reaped as a zombie shows up. Messages name nodes, so they are left out.
+func publicationRetryEventDiagnostics(
+	parent context.Context, c client.Client, b *strings.Builder, mig *v1beta1.Migration,
+) {
+	probeCtx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	events := &corev1.EventList{}
+	if err := c.List(probeCtx, events, client.InNamespace(mig.Namespace)); err != nil {
+		fmt.Fprintf(b, "[WARN] events %v\n", publicationRetryProbeError(err))
+		return
+	}
+	mine := slices.DeleteFunc(events.Items, func(e corev1.Event) bool {
+		return e.InvolvedObject.Name != mig.Name && !strings.HasPrefix(e.InvolvedObject.Name, mig.Name+"-")
+	})
+	slices.SortFunc(mine, func(x, y corev1.Event) int { return eventTime(x).Compare(eventTime(y)) })
+	if len(mine) == 0 {
+		fmt.Fprintf(b, "[WARN] events unavailable: none for the Migration or its objects\n")
+	}
+	for _, e := range mine[max(0, len(mine)-publicationRetryEventLimit):] {
+		object := strings.TrimPrefix(e.InvolvedObject.Name, mig.Name)
+		if !publicationRetryObjectSuffix.MatchString(object) {
+			object = publicationRetryUnavailable
+		}
+		fmt.Fprintf(b, "[INFO] event %s %s <migration>%s %s/%s count=%d\n", eventTime(e).UTC().Format(time.RFC3339),
+			publicationRetryToken(e.InvolvedObject.Kind), object, publicationRetryToken(e.Type),
+			publicationRetryToken(e.Reason), e.Count)
 	}
 }
 
@@ -414,8 +447,20 @@ func TestPublicationRetryDiagnostics(t *testing.T) {
 	}}
 	unowned := pod.DeepCopy()
 	unowned.Name, unowned.UID, unowned.OwnerReferences = "unowned-pod", "unowned-uid", nil
-	objects := make([]client.Object, 0, 6)
-	objects = append(objects, m, job, pod, unowned)
+	failed := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "failed", Namespace: nsE2E},
+		InvolvedObject: corev1.ObjectReference{Kind: "Job", Name: job.Name},
+		LastTimestamp:  metav1.NewTime(time.Date(2026, 11, 24, 19, 0, 50, 0, time.UTC)),
+		Type:           corev1.EventTypeWarning, Reason: reasonBackoffLimitExceeded, Count: 1,
+		Message: "on private-node.invalid"}
+	zombie := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "zombie", Namespace: nsE2E},
+		InvolvedObject: corev1.ObjectReference{Kind: "Migration", Name: m.Name},
+		EventTime:      metav1.NewMicroTime(time.Date(2026, 11, 24, 19, 1, 0, 0, time.UTC)),
+		Type:           corev1.EventTypeWarning, Reason: "WorkerZombie"}
+	foreign := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: nsE2E},
+		InvolvedObject: zombie.InvolvedObject, Type: corev1.EventTypeWarning, Reason: "ForeignReason"}
+	foreign.InvolvedObject.Name += "x"
+	objects := make([]client.Object, 0, 9)
+	objects = append(objects, m, job, pod, unowned, failed, zombie, foreign)
 	for _, cluster := range []string{sourceCluster, targetCluster} {
 		objects = append(objects, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name: cluster + "-1", Namespace: nsE2E,
@@ -435,13 +480,15 @@ func TestPublicationRetryDiagnostics(t *testing.T) {
 	for _, want := range []string{"Migration phase=Streaming attempts=2", "attempt=1 Job probe unavailable",
 		"attempt=2 Job condition=Failed", "termination reason=Error exit=12", "imageID=sha256:",
 		"prelude: opening work directory", "ERROR missing sentinel", "42|app|0|public.fixture",
-		"f|logical|pgoutput|<null>", "marker-3 probe unavailable: command exit=1", "[LOG] e2e-target origin-count 0"} {
+		"f|logical|pgoutput|<null>", "marker-3 probe unavailable: command exit=1", "[LOG] e2e-target origin-count 0",
+		"event 2026-11-24T19:00:50Z Job <migration>-run-2 Warning/BackoffLimitExceeded count=1\n" +
+			"[INFO] event 2026-11-24T19:01:00Z Migration <migration> Warning/WorkerZombie count=0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q from diagnostics:\n%s", want, out)
 		}
 	}
 	for _, forbidden := range []string{".invalid", "credential", publicationRetryTestPod,
-		"unowned-pod", "after-log-byte-limit"} {
+		"unowned-pod", "after-log-byte-limit", "ForeignReason"} {
 		if strings.Contains(out, forbidden) {
 			t.Fatalf("diagnostics retained %q", forbidden)
 		}
@@ -480,7 +527,7 @@ func TestPublicationRetryUnavailableDiagnostics(t *testing.T) {
 	})
 	out := publicationRetryDiagnostics(c, command, m, "public.fixture", "fixture_slot")
 	if strings.Contains(out, ".invalid") || strings.Contains(out, "[LOG] 0") ||
-		strings.Count(out, "probe unavailable") != 8 {
+		strings.Count(out, "probe unavailable") != 9 {
 		t.Fatalf("failed probes were not safely reported: %s", out)
 	}
 	if calls, _, _ := state.snapshot(); len(calls) != 0 {
