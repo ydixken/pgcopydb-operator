@@ -24,6 +24,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -101,6 +103,19 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	create(mig)
 	m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 	expectConditionTrue(m, v1beta1.ConditionCloneCompleted)
+	By("checking that the log cursor belongs to the running worker")
+	job := &batchv1.Job{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: nsE2E, Name: fmt.Sprintf("%s-run-%d", name, m.Status.Attempts),
+	}, job)).To(Succeed())
+	pods := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+		client.MatchingLabels{"job-name": job.Name})).To(Succeed())
+	Expect(len(pods.Items)).To(Equal(1), "expected one worker pod")
+	Expect(m.Status.WorkerLogCursor).NotTo(BeNil())
+	Expect(m.Status.WorkerLogCursor.JobUID).To(Equal(string(job.UID)))
+	Expect(m.Status.WorkerLogCursor.PodUID).To(Equal(string(pods.Items[0].UID)))
+	Expect(m.Status.WorkerLogCursor.LastTimestamp).NotTo(BeNil())
 	Expect(m.Spec.Follow.MaxCatchupLag).NotTo(BeNil())
 	threshold := m.Spec.Follow.MaxCatchupLag.Value()
 	Expect(threshold).To(Equal(int64(16<<20)), "the regression must use the default catch-up threshold")
