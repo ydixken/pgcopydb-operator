@@ -344,14 +344,14 @@ func TestObserveRunningJob_StatusPatchFailure(t *testing.T) {
 func TestReconcileFollowRunning_EarlyReturns(t *testing.T) {
 	m := followPasswordMigration()
 	r := &MigrationReconciler{}
-	r.reconcileFollowRunning(context.Background(), m, "j", true)
+	r.reconcileFollowRunning(context.Background(), m, "j", true, false)
 	if m.Status.Replication != nil {
 		t.Fatal("nil sentinel must not touch replication status")
 	}
 
 	fake := &fakeSentinel{}
 	r = &MigrationReconciler{Sentinel: fake}
-	r.reconcileFollowRunning(context.Background(), m, "j", true)
+	r.reconcileFollowRunning(context.Background(), m, "j", true, false)
 	if m.Status.Replication != nil {
 		t.Fatal("a nil sample must keep the previous replication status")
 	}
@@ -371,7 +371,9 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 	firstAt := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
 	logs := &fakeLogs{tsOut: firstAt.Format(time.RFC3339Nano) +
 		` {"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n" +
-		firstAt.Format(time.RFC3339Nano) + ` {"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n"}
+		firstAt.Format(time.RFC3339Nano) + ` {"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n" +
+		firstAt.Add(time.Second).Format(time.RFC3339Nano) +
+		` {"error_severity":"INFO","message":"Follow mode is now done, reached endpos 1/76081A70"}` + "\n"}
 	r := &MigrationReconciler{Logs: logs}
 	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobKindWorker, UID: "job-uid"}}
@@ -390,6 +392,9 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 	if got := m.Status.WorkerLogCursor.SupervisorDeathAt; got == nil || !got.Time.Equal(firstAt) {
 		t.Fatalf("supervisor death cursor = %v, want %v", got, firstAt)
 	}
+	if got := m.Status.WorkerLogCursor.FollowDoneAt; got == nil || !got.Time.Equal(firstAt.Add(time.Second)) {
+		t.Fatalf("follow done cursor = %v, want %v", got, firstAt.Add(time.Second))
+	}
 
 	logs.tsOut = firstAt.Add(2*time.Second).Format(time.RFC3339Nano) +
 		` {"error_severity":"INFO","message":"reported write_lsn 0/5000"}` + "\n"
@@ -401,9 +406,9 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 		t.Fatal("second scan must not invent a clone marker")
 	}
 	if logs.lastPreviousPodUID != "worker-pod" || logs.lastSince == nil ||
-		!logs.lastSince.Time.Equal(firstAt) {
+		!logs.lastSince.Time.Equal(firstAt.Add(time.Second)) {
 		t.Fatalf("second scan cursor = (pod %q, since %v), want (worker-pod, %v)",
-			logs.lastPreviousPodUID, logs.lastSince, firstAt)
+			logs.lastPreviousPodUID, logs.lastSince, firstAt.Add(time.Second))
 	}
 	if got := m.Status.WorkerLogCursor.LastTimestamp.Time; !got.Equal(firstAt.Add(2 * time.Second)) {
 		t.Fatalf("advanced cursor = %v, want %v", got, firstAt.Add(2*time.Second))
@@ -411,8 +416,11 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 	if got := m.Status.WorkerLogCursor.SupervisorDeathAt; got == nil || !got.Time.Equal(firstAt) {
 		t.Fatalf("supervisor death cursor = %v, want retained %v", got, firstAt)
 	}
+	if got := m.Status.WorkerLogCursor.FollowDoneAt; got == nil || !got.Time.Equal(firstAt.Add(time.Second)) {
+		t.Fatalf("follow done cursor = %v, want retained %v", got, firstAt.Add(time.Second))
+	}
 
-	logs.streamPodUID = "replacement-pod"
+	logs.streamPodUID = replacementPodUID
 	replacementAt := firstAt.Add(3 * time.Second)
 	logs.tsOut = replacementAt.Format(time.RFC3339Nano) +
 		` {"error_severity":"INFO","message":"reported write_lsn 0/6000"}` + "\n"
@@ -420,9 +428,9 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	cursor := m.Status.WorkerLogCursor
-	if cursor.PodUID != "replacement-pod" || cursor.LastTimestamp == nil ||
-		!cursor.LastTimestamp.Time.Equal(replacementAt) || cursor.SupervisorDeathAt != nil {
-		t.Fatalf("replacement pod cursor = %+v, want fresh cursor without old death time", cursor)
+	if cursor.PodUID != replacementPodUID || cursor.LastTimestamp == nil ||
+		!cursor.LastTimestamp.Time.Equal(replacementAt) || cursor.SupervisorDeathAt != nil || cursor.FollowDoneAt != nil {
+		t.Fatalf("replacement pod cursor = %+v, want fresh cursor without old marker times", cursor)
 	}
 }
 

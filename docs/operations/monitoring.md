@@ -448,6 +448,8 @@ The promtool unit tests under `test/alerts/` pin each one, so when you tune a va
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending` |
 | `PgcopydbMigrationCutoverStalled` | critical | The endpos is not reached for 15m in `CuttingOver` |
 
+The `CutoverStalled=True` condition reports a different case: pgcopydb reached endpos, but its worker did not exit within 15 minutes.
+
 `PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail reads as `Finalizing`.
 That tail can keep the target size flat while nothing stalls.
 `PgcopydbMigrationCommitsBlocked` reads the two conditions, not the gauges, so only the operator holds the 30-second threshold.

@@ -43,6 +43,7 @@ When the pod is already gone, the condition carries only the Job message.
 | [`status.progress` stands still while a large table copies](#progress-stops-moving-while-a-large-table-copies) | Clone progress |
 | [`CloneCompleted` is `False` with reason `TablesEmptyOnTarget`](#clonecompleted-is-false-with-reason-tablesemptyontarget) | Clone progress |
 | [Phase `Failed`, reason `CloneIncomplete`](#phase-failed-with-reason-cloneincomplete) | Clone progress |
+| [`CutoverStalled` is True](#cutoverstalled-is-true) | Cutover and verification |
 | [`CutoverCompleted` is Unknown with reason `RehearsalPodRemains`](#cutovercompleted-is-unknown-with-reason-rehearsalpodremains) | Cutover and verification |
 | [The `<name>-verify` pod runs for a long time](#the-verify-pod-runs-for-a-long-time) | Cutover and verification |
 | [Phase `Failed`, reason `DrainIncomplete`](#phase-failed-with-reason-drainincomplete) | Cutover and verification |
@@ -664,11 +665,14 @@ Then `CloneCompleted` becomes True on the next pass, and the stream conditions b
 
 ### `CloneCompleted` stays False with reason `CloneMarkerSeen`
 
-`CloneMarkerSeen` means the operator read pgcopydb's clone-end marker but could not yet confirm it with a fresh database sample.
-The marker and the timestamp cursor are persisted in Migration status, so a controller restart or more than 1,000 later log lines will not lose the completion signal.
-The operator keeps the condition False until the sample succeeds; inspect the operator log for `database sample failed` and the target's availability.
-If the pod is replaced, the operator starts scanning that pod's logs from the beginning.
-Kubernetes cannot return log lines that have already been rotated away before the operator first reads them.
+`CloneMarkerSeen` means the operator read pgcopydb's clone-end marker, but a fresh database sample is still needed.
+The operator stores the marker and timestamp cursor in Migration status.
+The status keeps the completion signal across a controller restart and more than 1,000 later log lines.
+The condition stays False until a fresh sample shows that the copy finished.
+Read the operator log for `database sample failed`.
+Make sure the target is available.
+If Kubernetes replaces the pod, the operator starts scanning its logs from the beginning.
+Kubernetes does not return lines that rotated away before the operator first read them.
 
 ### Progress stops moving while a large table copies
 
@@ -727,6 +731,29 @@ Read `status.progress` and the worker log.
 Then run a fresh Migration.
 
 ## Cutover and verification
+
+### `CutoverStalled` is True
+
+`CutoverStalled=True` means pgcopydb logged that follow reached endpos, but the worker did not exit within 15 minutes.
+`Streaming=False` with reason `FollowDone` replaces `Replaying` while pgcopydb finishes its post-drain work, including sequence synchronization.
+With multiple WAL workers, the operator waits for the message that all workers reached endpos, not the message from one worker.
+Once `CloneCompleted` is True, the operator stops sentinel reads and endpos nudges when it sees this marker.
+
+Read the worker log.
+Make sure the worker pod still runs.
+
+```sh
+kubectl get pods -n <namespace> -l job-name=<migration>-run-<attempt>
+kubectl logs -n <namespace> job/<migration>-run-<attempt> -c pgcopydb --tail=100
+```
+
+Inspect database activity for blocked or long-running sequence operations.
+The operator does not stop or signal the worker when this condition is True.
+
+> [!warning]
+> Stopping pgcopydb can interrupt sequence synchronization.
+> The drain verifier compares replicated data. It does not compare sequence values.
+> `CutoverCompleted=True` does not prove that the sequence values match after the worker stops early.
 
 ### `CutoverCompleted` is Unknown with reason `RehearsalPodRemains`
 
