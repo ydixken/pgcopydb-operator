@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os/exec"
@@ -42,22 +43,23 @@ import (
 // migrationLabel is the label the operator puts on a Migration's Jobs and pods.
 const migrationLabel = "pgcopydb-operator.io/migration"
 
-// comparePodLog is one compare attempt's log, or the error of the last read.
-type comparePodLog struct {
-	check, log string
-	err        error
+// jobPodLog is one finished pod's log, or the error of the last read.
+type jobPodLog struct {
+	job, log string
+	phase    corev1.PodPhase
+	err      error
 }
 
-// captureComparePodLogs keeps each finished compare pod's log, keyed by pod name.
-// A storage remount can delete finished pods before the spec reads them, so the
-// spec reads every attempt as soon as it ends rather than through the Job later.
-func captureComparePodLogs(
-	parent context.Context, c client.Client, command commandFactory, migration string, logs map[string]comparePodLog,
+// captureJobPodLogs keeps each finished pod's log of jobs, keyed by pod name.
+// A storage remount deletes every pod that mounts the work volume, finished ones
+// too, so a spec reads each pod as soon as it ends rather than through the Job later.
+func captureJobPodLogs(
+	parent context.Context, c client.Client, command commandFactory, jobs []string, logs map[string]jobPodLog,
 ) {
-	for _, check := range []string{compareSchemaCheck, compareDataCheck} {
+	for _, job := range jobs {
 		pods := &corev1.PodList{}
 		if err := c.List(parent, pods, client.InNamespace(nsE2E),
-			client.MatchingLabels{batchv1.JobNameLabel: migration + "-compare-" + check}); err != nil {
+			client.MatchingLabels{batchv1.JobNameLabel: job}); err != nil {
 			continue
 		}
 		for _, pod := range pods.Items {
@@ -68,15 +70,34 @@ func captureComparePodLogs(
 			logCtx, cancel := context.WithTimeout(parent, e2eCommandTimeout)
 			out, err := commandOutput(logCtx, command, "kubectl", "logs", "-n", nsE2E, "pod/"+pod.Name, "--tail=-1")
 			cancel()
-			logs[pod.Name] = comparePodLog{check: check, log: string(out), err: err}
+			logs[pod.Name] = jobPodLog{job: job, log: string(out), phase: pod.Status.Phase, err: err}
 		}
 	}
+}
+
+// succeededJobLog returns the captured log of job's succeeded pod. A pod that
+// was never captured is an error, so a lost log cannot pass an assertion.
+func succeededJobLog(logs map[string]jobPodLog, job string) (string, error) {
+	for _, name := range slices.Sorted(maps.Keys(logs)) {
+		if attempt := logs[name]; attempt.job == job && attempt.phase == corev1.PodSucceeded {
+			if attempt.err != nil {
+				return "", fmt.Errorf("reading the log of pod %s of Job %s failed: %w", name, job, attempt.err)
+			}
+			return attempt.log, nil
+		}
+	}
+	return "", fmt.Errorf("no succeeded pod of Job %s was captured before its log could be lost", job)
+}
+
+// compareJobs names the compare Jobs of the Migration called name.
+func compareJobs(name string) []string {
+	return []string{name + "-compare-" + compareSchemaCheck, name + "-compare-" + compareDataCheck}
 }
 
 // reportVerificationOnFailure attaches verificationDiagnostics to a failed
 // spec. Register it after the fixture cleanup so it runs first, while the
 // Jobs still exist.
-func reportVerificationOnFailure(m *v1beta1.Migration, logs map[string]comparePodLog) {
+func reportVerificationOnFailure(m *v1beta1.Migration, logs map[string]jobPodLog) {
 	DeferCleanup(func() {
 		if CurrentSpecReport().Failed() {
 			AddReportEntry("verification before cleanup",
@@ -85,29 +106,32 @@ func reportVerificationOnFailure(m *v1beta1.Migration, logs map[string]comparePo
 	})
 }
 
-// waitCompletedCapturing waits for Completed like waitCompleted and reads
-// each compare pod's log as soon as it finishes.
-func waitCompletedCapturing(m *v1beta1.Migration, logs map[string]comparePodLog) *v1beta1.Migration {
+// waitCompletedCapturing waits for Completed like waitPhase and reads each
+// finished pod of jobs as soon as it ends.
+func waitCompletedCapturing(
+	m *v1beta1.Migration, timeout time.Duration, logs map[string]jobPodLog, jobs ...string,
+) *v1beta1.Migration {
 	GinkgoHelper()
 	completed := &v1beta1.Migration{}
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), completed)).To(Succeed())
 		// Read after the phase: a pod the operator counted as finished is terminal by now.
-		captureComparePodLogs(ctx, k8sClient, exec.CommandContext, m.Name, logs)
+		captureJobPodLogs(ctx, k8sClient, exec.CommandContext, jobs, logs)
 		if completed.Status.Phase == v1beta1.PhaseFailed {
 			StopTrying("migration failed: " + failureMessage(completed)).Now()
 		}
-		g.Expect(completed.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
-	}, migrationTimeout, time.Second).Should(Succeed())
+		g.Expect(completed.Status.Phase).To(Equal(v1beta1.PhaseCompleted),
+			"migration %s at phase %q, attempts %d", m.Name, completed.Status.Phase, completed.Status.Attempts)
+	}, timeout, time.Second).Should(Succeed())
 	// Retries only reads that failed on the last poll.
-	captureComparePodLogs(ctx, k8sClient, exec.CommandContext, m.Name, logs)
+	captureJobPodLogs(ctx, k8sClient, exec.CommandContext, jobs, logs)
 	return completed
 }
 
 // verificationDiagnostics reports rather than asserts, so a missing object
 // explains the failure instead of replacing it.
 func verificationDiagnostics(
-	parent context.Context, c client.Client, m *v1beta1.Migration, logs map[string]comparePodLog,
+	parent context.Context, c client.Client, m *v1beta1.Migration, logs map[string]jobPodLog,
 ) string {
 	diagCtx, cancel := context.WithTimeout(parent, e2eCommandTimeout)
 	defer cancel()
@@ -170,13 +194,13 @@ func verificationDiagnostics(
 		}
 	}
 	if len(logs) == 0 {
-		b.WriteString("no compare pod logs captured\n")
+		b.WriteString("no pod logs captured\n")
 	}
 	for _, name := range slices.Sorted(maps.Keys(logs)) {
 		attempt := logs[name]
 		lines := strings.Split(strings.TrimRight(attempt.log, "\n"), "\n")
-		fmt.Fprintf(&b, "log %s check=%s err=%v, last lines:\n%s\n",
-			name, attempt.check, attempt.err, strings.Join(lines[max(0, len(lines)-20):], "\n"))
+		fmt.Fprintf(&b, "log %s job=%s err=%v, last lines:\n%s\n",
+			name, attempt.job, attempt.err, strings.Join(lines[max(0, len(lines)-20):], "\n"))
 	}
 	return b.String()
 }
@@ -235,28 +259,29 @@ func verificationTestPod(name, job string, phase corev1.PodPhase) *corev1.Pod {
 	}, Status: corev1.PodStatus{Phase: phase}}
 }
 
-func TestCaptureComparePodLogs(t *testing.T) {
+func TestCaptureJobPodLogs(t *testing.T) {
 	c := publicationRetryTestClient(t,
 		verificationTestPod("schema-a", "e2e-partition-1-compare-schema", corev1.PodFailed),
 		verificationTestPod("schema-b", "e2e-partition-1-compare-schema", corev1.PodRunning),
-		verificationTestPod("data-a", "e2e-partition-1-compare-data", corev1.PodFailed),
-		verificationTestPod("other", "e2e-partition-2-compare-data", corev1.PodFailed),
+		verificationTestPod("verify-a", "e2e-partition-1-verify", corev1.PodSucceeded),
+		verificationTestPod("other", "e2e-partition-2-verify", corev1.PodSucceeded),
 	)
-	// The failed first read of schema-a is retried; data-a is read once.
+	// The failed first read of schema-a is retried; verify-a is read once.
 	command, state := newPSQLExecCommand(t,
 		psqlExecResult{stderr: "pod not found", exitCode: 1},
-		psqlExecResult{stdout: "data: Partition topology mismatch\n"},
+		psqlExecResult{stdout: "verify log\n"},
 		psqlExecResult{stdout: "schema: Partition topology mismatch\n"},
 	)
-	logs := map[string]comparePodLog{}
-	captureComparePodLogs(context.Background(), c, command, "e2e-partition-1", logs)
+	jobs := []string{"e2e-partition-1-compare-schema", "e2e-partition-1-verify"}
+	logs := map[string]jobPodLog{}
+	captureJobPodLogs(context.Background(), c, command, jobs, logs)
 	if logs["schema-a"].err == nil {
 		t.Fatalf("failed read recorded as success: %+v", logs)
 	}
-	captureComparePodLogs(context.Background(), c, command, "e2e-partition-1", logs)
-	want := map[string]comparePodLog{
-		"schema-a": {check: compareSchemaCheck, log: "schema: Partition topology mismatch\n"},
-		"data-a":   {check: compareDataCheck, log: "data: Partition topology mismatch\n"},
+	captureJobPodLogs(context.Background(), c, command, jobs, logs)
+	want := map[string]jobPodLog{
+		"schema-a": {job: jobs[0], log: "schema: Partition topology mismatch\n", phase: corev1.PodFailed},
+		"verify-a": {job: jobs[1], log: "verify log\n", phase: corev1.PodSucceeded},
 	}
 	if !reflect.DeepEqual(logs, want) {
 		t.Fatalf("captured %+v, want %+v", logs, want)
@@ -266,6 +291,24 @@ func TestCaptureComparePodLogs(t *testing.T) {
 		t.Fatalf("unexpected log reads: %v", calls)
 	}
 	requirePSQLCommandsReaped(t, commands)
+}
+
+func TestSucceededJobLog(t *testing.T) {
+	logs := map[string]jobPodLog{
+		"verify-a":  {job: "m-verify", log: "first attempt\n", phase: corev1.PodFailed},
+		"verify-b":  {job: "m-verify", log: "drain verified\n", phase: corev1.PodSucceeded},
+		"compare-a": {job: "m-compare-data", phase: corev1.PodSucceeded, err: errors.New("pod not found")},
+	}
+	if got, err := succeededJobLog(logs, "m-verify"); err != nil || got != "drain verified\n" {
+		t.Fatalf("succeededJobLog(m-verify) = %q, %v", got, err)
+	}
+	for job, want := range map[string]string{
+		"m-compare-data": "pod not found", "m-cleanup": "no succeeded pod of Job m-cleanup",
+	} {
+		if _, err := succeededJobLog(logs, job); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("succeededJobLog(%s) error %v, want %q", job, err, want)
+		}
+	}
 }
 
 func TestVerificationDiagnostics(t *testing.T) {
@@ -301,14 +344,14 @@ func TestVerificationDiagnostics(t *testing.T) {
 	}
 	c := publicationRetryTestClient(t, m, job, pvc, mine, operatorEvent, other)
 	out := verificationDiagnostics(context.Background(), c, m,
-		map[string]comparePodLog{"schema-a": {check: compareSchemaCheck, log: log.String()}})
+		map[string]jobPodLog{"schema-a": {job: m.Name + "-compare-schema", log: log.String()}})
 	for _, want := range []string{"migration e2e-partition-1 phase=Completed attempts=1",
 		"condition Verified=False SchemaMismatch: compare schema failed", "verification schema passed=false",
 		"job e2e-partition-1-compare-schema uid=job-uid", "failed=1",
 		"condition Failed=True BackoffLimitExceeded", "no pods", "work PVC volume=pv-work",
 		"Pod/e2e-partition-1-compare-schema-x Normal/Killing: Stopping container",
 		"event 2026-10-05T17:16:01Z Migration/e2e-partition-1 Warning/VerificationMismatch: compare failed",
-		"log schema-a check=schema", "line-11", "line-30"} {
+		"log schema-a job=e2e-partition-1-compare-schema", "line-11", "line-30"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q from diagnostics:\n%s", want, out)
 		}

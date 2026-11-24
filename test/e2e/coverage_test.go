@@ -71,10 +71,10 @@ var _ = Describe("Feature coverage", SpecPriority(1), func() {
 			applyCoverageSection(c, c.setup, identity)
 		}
 
-		captured := map[string]comparePodLog{}
+		captured := map[string]jobPodLog{}
 		reportVerificationOnFailure(m, captured)
 		create(m)
-		completed := waitCompletedCapturing(m, captured)
+		completed := waitCompletedCapturing(m, migrationTimeout, captured, compareJobs(m.Name)...)
 		expectCoverageIdentical(cases, identity, completed)
 	})
 })

@@ -100,7 +100,7 @@ func stalledSequenceReset() {
 
 	By("releasing the sequence and completing the migration")
 	release()
-	completed := waitCompletedCapturing(m, captured)
+	completed := waitCompletedCapturing(m, migrationTimeout, captured, compareJobs(m.Name)...)
 	stalled := apimeta.FindStatusCondition(completed.Status.Conditions, v1beta1.ConditionCutoverStalled)
 	Expect(stalled).NotTo(BeNil())
 	Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
@@ -131,7 +131,7 @@ func overlappingTransactions() {
 		" ON b.side = 'B' AND b.round = a.round AND b.step = 1 WHERE a.side = 'A' AND a.step = 1 AND a.xid < b.xid")).
 		To(Equal("4"), "A must hold its transaction id before B begins, in every round")
 	approveCutover(m.Name)
-	completed := waitCompletedCapturing(m, captured)
+	completed := waitCompletedCapturing(m, migrationTimeout, captured, compareJobs(m.Name)...)
 	expectConditionTrue(completed, v1beta1.ConditionCutoverComplete)
 	expectCoverageIdentical([]coverageCase{c}, identity, completed)
 }
@@ -272,7 +272,7 @@ func followCorrectnessCase(name, setup string) coverageCase {
 // and waits until it is caught up at the gate.
 func startFollowCorrectness(
 	prefix string, c coverageCase,
-) (*v1beta1.Migration, string, map[string]comparePodLog) {
+) (*v1beta1.Migration, string, map[string]jobPodLog) {
 	GinkgoHelper()
 	identity := fmt.Sprint(time.Now().UnixNano())
 	m, captured := prepareCoverageFollow(prefix+identity, []coverageCase{c}, identity)

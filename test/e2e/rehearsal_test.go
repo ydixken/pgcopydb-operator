@@ -35,10 +35,6 @@ import (
 // rehearsalRows sizes the rehearsed table, so the compare scans more than a page.
 const rehearsalRows = 20000
 
-// verifyLogLines keeps the whole verify Job log: the drain path is decided near
-// its start, and the compare output follows.
-const verifyLogLines = 100000
-
 // The rehearsal's filtered selection is one stamped schema; outside it, the source
 // holds the pair's seed tables, so a compare that lost the filters would not complete.
 var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
@@ -152,7 +148,8 @@ var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
 		}
 
 		By("expecting the drain verify and the data verification to pass")
-		done := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		logs := map[string]jobPodLog{}
+		done := waitCompletedCapturing(m, followTimeout, logs, name+"-verify")
 		expectSingleAttempt(done)
 		expectConditionTrue(done, v1beta1.ConditionCutoverComplete)
 		expectConditionTrue(done, v1beta1.ConditionVerified)
@@ -165,7 +162,9 @@ var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
 
 		By("expecting a progress item for each compare: the rehearsal's kept, the drain's, and the data check's")
 		expectFinalProgress(done, v1beta1.VerificationProgressRehearsal, st.JobName)
-		expectDrainProgress(done)
+		verifyLog, err := succeededJobLog(logs, name+"-verify")
+		Expect(err).NotTo(HaveOccurred())
+		expectDrainProgress(done, verifyLog)
 		expectFinalProgress(done, v1beta1.VerificationProgressData, name+"-compare-"+compareDataCheck)
 		Expect(psql(targetCluster, "SELECT count(*) FROM "+table)).To(Equal(fmt.Sprint(rehearsalRows + 1)))
 	})
@@ -195,10 +194,9 @@ func expectFinalProgress(m *v1beta1.Migration, kind, job string) {
 
 // expectDrainProgress holds the drain item to the verify Job's log: a drain decided by
 // content leaves a final sample, and the exact-LSN fast path, which compares nothing, none.
-func expectDrainProgress(m *v1beta1.Migration) {
+func expectDrainProgress(m *v1beta1.Migration, log string) {
 	GinkgoHelper()
 	job := m.Name + "-verify"
-	log := jobLogs(job, verifyLogLines)
 	switch {
 	case strings.Contains(log, "Deciding by content"):
 		expectFinalProgress(m, v1beta1.VerificationProgressDrain, job)

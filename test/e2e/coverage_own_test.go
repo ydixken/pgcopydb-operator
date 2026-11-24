@@ -31,7 +31,7 @@ type coverageOwnRun struct {
 	c        coverageCase
 	m        *v1beta1.Migration
 	identity string
-	captured map[string]comparePodLog
+	captured map[string]jobPodLog
 }
 
 // coverageOwnOutcomes drive an own case's Migration from creation to the

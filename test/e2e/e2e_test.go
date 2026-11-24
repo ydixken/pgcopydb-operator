@@ -268,12 +268,15 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 		// A follow migration with data verification can run two whole
 		// compares, the drain's fallback and the one Verifying does, so
 		// this spec gets the follow budget, not the clone one.
-		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		logs := map[string]jobPodLog{}
+		m = waitCompletedCapturing(mig, followTimeout, logs, name+"-verify")
 		expectSingleAttempt(m)
 		expectConditionTrue(m, v1beta1.ConditionVerified)
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
-		expectDrainProgress(m)
+		verifyLog, err := succeededJobLog(logs, name+"-verify")
+		Expect(err).NotTo(HaveOccurred())
+		expectDrainProgress(m, verifyLog)
 		expectFinalProgress(m, v1beta1.VerificationProgressData, name+"-compare-"+compareDataCheck)
 
 		By("checking every committed row arrived, with no gaps")
@@ -337,10 +340,11 @@ var _ = Describe("Migration", func() {
 		create(m)
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 		approveCutover(name)
-		done := waitCompleted(name, nsE2E)
+		logs := map[string]jobPodLog{}
+		done := waitCompletedCapturing(m, migrationTimeout, logs, name+"-compare-"+compareDataCheck)
 		expectConditionTrue(done, v1beta1.ConditionCutoverComplete)
 		expectConditionTrue(done, v1beta1.ConditionVerified)
-		Expect(jobLogs(name+"-compare-data", 100)).To(ContainSubstring("empty databases verified"))
+		Expect(succeededJobLog(logs, name+"-compare-"+compareDataCheck)).To(ContainSubstring("empty databases verified"))
 		Expect(sourceSlotCount()).To(Equal("0"))
 		Expect(targetOriginCount()).To(Equal("0"))
 	})
