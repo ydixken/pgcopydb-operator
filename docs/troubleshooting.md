@@ -39,6 +39,7 @@ When the pod is already gone, the condition carries only the Job message.
 | [The worker pod runs and logs, but the phase never moves](#the-worker-pod-runs-but-the-phase-never-moves) | Clone progress |
 | [`Finalizing` runs long and the worker pod is still running](#finalizing-takes-a-long-time) | Clone progress |
 | [`Streaming` and `CaughtUp` stay unset during the clone](#streaming-and-caughtup-stay-unset-during-the-clone) | Clone progress |
+| [`CloneCompleted` stays False with reason `CloneMarkerSeen`](#clonecompleted-stays-false-with-reason-clonemarkerseen) | Clone progress |
 | [`status.progress` stands still while a large table copies](#progress-stops-moving-while-a-large-table-copies) | Clone progress |
 | [`CloneCompleted` is `False` with reason `TablesEmptyOnTarget`](#clonecompleted-is-false-with-reason-tablesemptyontarget) | Clone progress |
 | [Phase `Failed`, reason `CloneIncomplete`](#phase-failed-with-reason-cloneincomplete) | Clone progress |
@@ -660,6 +661,14 @@ The pass is healthy while the `STEP` lines advance.
 
 Wait for the worker to print `All step are now done`.
 Then `CloneCompleted` becomes True on the next pass, and the stream conditions become active.
+
+### `CloneCompleted` stays False with reason `CloneMarkerSeen`
+
+`CloneMarkerSeen` means the operator read pgcopydb's clone-end marker but could not yet confirm it with a fresh database sample.
+The marker and the timestamp cursor are persisted in Migration status, so a controller restart or more than 1,000 later log lines will not lose the completion signal.
+The operator keeps the condition False until the sample succeeds; inspect the operator log for `database sample failed` and the target's availability.
+If the pod is replaced, the operator starts scanning that pod's logs from the beginning.
+Kubernetes cannot return log lines that have already been rotated away before the operator first reads them.
 
 ### Progress stops moving while a large table copies
 

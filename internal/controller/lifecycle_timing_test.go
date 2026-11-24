@@ -398,7 +398,8 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 				r.Sentinel = &fakeSentinel{}
 			}
 			if tc.zombie {
-				r.Logs = &fakeLogs{tsOut: string(supervisorDeathTail(2 * zombieGrace))}
+				ts := clock.Now().Add(-2 * zombieGrace).UTC().Format(time.RFC3339Nano)
+				r.Logs = &fakeLogs{tsOut: ts + " FATAL Terminating all processes in our process group\n"}
 			}
 			reconcileStart := clock.Now().Add(-pollInterval)
 			res, err := r.observeRunningJob(ctx, m, m.DeepCopy(), &batchv1.Job{

@@ -235,6 +235,7 @@ func TestJobFinished(t *testing.T) {
 // overrides the operator default, and every derived Job honors it.
 // Names for the non-worker Jobs, so the table keys are not bare literals.
 const (
+	jobKindWorker    = "worker"
 	jobKindCleanup   = "cleanup"
 	jobKindVerify    = "verify"
 	jobKindPreflight = "preflight"
@@ -300,7 +301,7 @@ func TestBuildJob_RunnerImage(t *testing.T) {
 
 	m.Spec.Runner.Image = "custom/runner:v9"
 	for name, build := range map[string]func() (*batchv1.Job, error){
-		"worker":         func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
+		jobKindWorker:    func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
 		jobKindCleanup:   func() (*batchv1.Job, error) { return buildCleanupJob(m, "default:img") },
 		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img", "") },
 		jobKindRehearsal: func() (*batchv1.Job, error) { return buildRehearsalJob(m, "default:img", 1) },

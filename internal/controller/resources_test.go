@@ -297,7 +297,7 @@ func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
 				build func() (*batchv1.Job, error)
 				want  bool
 			}{
-				"worker":         {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
+				jobKindWorker:    {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
 				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
 				jobKindGate:      {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
 				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},

@@ -32,6 +32,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -361,9 +362,93 @@ func TestReconcileFollowRunning_EarlyReturns(t *testing.T) {
 
 // supervisorDeathTail fabricates a runtime-timestamped log tail whose
 // supervisor-death marker is age old.
-func supervisorDeathTail(age time.Duration) []byte {
-	ts := time.Now().Add(-age).UTC().Format(time.RFC3339Nano)
-	return []byte(ts + " FATAL Terminating all processes in our process group\n")
+func supervisorDeathCursor(age time.Duration) *v1beta1.WorkerLogCursor {
+	deathAt := metav1.NewTime(time.Now().Add(-age))
+	return &v1beta1.WorkerLogCursor{SupervisorDeathAt: &deathAt}
+}
+
+func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
+	firstAt := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	logs := &fakeLogs{tsOut: firstAt.Format(time.RFC3339Nano) +
+		` {"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n" +
+		firstAt.Format(time.RFC3339Nano) + ` {"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n"}
+	r := &MigrationReconciler{Logs: logs}
+	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobKindWorker, UID: "job-uid"}}
+
+	scan, err := r.scanWorkerLogs(context.Background(), m, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scan.CloneDone || m.Status.WorkerLogCursor == nil ||
+		m.Status.WorkerLogCursor.LastTimestamp == nil {
+		t.Fatal("first scan must detect the marker and persist its timestamp cursor")
+	}
+	if got := m.Status.WorkerLogCursor.PodUID; got != "worker-pod" {
+		t.Fatalf("pod UID = %q, want worker-pod", got)
+	}
+	if got := m.Status.WorkerLogCursor.SupervisorDeathAt; got == nil || !got.Time.Equal(firstAt) {
+		t.Fatalf("supervisor death cursor = %v, want %v", got, firstAt)
+	}
+
+	logs.tsOut = firstAt.Add(2*time.Second).Format(time.RFC3339Nano) +
+		` {"error_severity":"INFO","message":"reported write_lsn 0/5000"}` + "\n"
+	scan, err = r.scanWorkerLogs(context.Background(), m, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.CloneDone {
+		t.Fatal("second scan must not invent a clone marker")
+	}
+	if logs.lastPreviousPodUID != "worker-pod" || logs.lastSince == nil ||
+		!logs.lastSince.Time.Equal(firstAt) {
+		t.Fatalf("second scan cursor = (pod %q, since %v), want (worker-pod, %v)",
+			logs.lastPreviousPodUID, logs.lastSince, firstAt)
+	}
+	if got := m.Status.WorkerLogCursor.LastTimestamp.Time; !got.Equal(firstAt.Add(2 * time.Second)) {
+		t.Fatalf("advanced cursor = %v, want %v", got, firstAt.Add(2*time.Second))
+	}
+	if got := m.Status.WorkerLogCursor.SupervisorDeathAt; got == nil || !got.Time.Equal(firstAt) {
+		t.Fatalf("supervisor death cursor = %v, want retained %v", got, firstAt)
+	}
+
+	logs.streamPodUID = "replacement-pod"
+	replacementAt := firstAt.Add(3 * time.Second)
+	logs.tsOut = replacementAt.Format(time.RFC3339Nano) +
+		` {"error_severity":"INFO","message":"reported write_lsn 0/6000"}` + "\n"
+	if _, err := r.scanWorkerLogs(context.Background(), m, job); err != nil {
+		t.Fatal(err)
+	}
+	cursor := m.Status.WorkerLogCursor
+	if cursor.PodUID != "replacement-pod" || cursor.LastTimestamp == nil ||
+		!cursor.LastTimestamp.Time.Equal(replacementAt) || cursor.SupervisorDeathAt != nil {
+		t.Fatalf("replacement pod cursor = %+v, want fresh cursor without old death time", cursor)
+	}
+}
+
+func TestFinishFollow_PreservesUnconfirmedCloneMarker(t *testing.T) {
+	ctx := context.Background()
+	m := followPasswordMigration()
+	meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+		Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reasonCloneMarkerSeen,
+		Message: "pgcopydb logged clone completion; waiting for a confirming database sample",
+	})
+	r := failingReconciler(t, interceptor.Funcs{}, m, namedJob(workerJob))
+	if !cloneMarkerSeen(m) {
+		t.Fatal("test setup did not set the unconfirmed clone marker condition")
+	}
+
+	if _, err := r.finishFollow(ctx, m, m.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	got := &v1beta1.Migration{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(m), got); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != reasonCloneMarkerSeen {
+		t.Fatalf("CloneCompleted = %+v, want False/%s until a sample confirms it", condition, reasonCloneMarkerSeen)
+	}
 }
 
 // TestReapZombieWorker_GraceOutlivesOnePoll pins the reason zombieGrace is a
@@ -376,7 +461,7 @@ func TestReapZombieWorker_GraceOutlivesOnePoll(t *testing.T) {
 		Name: workerPodName, Namespace: "ns", Labels: map[string]string{jobNameLabel: workerJob},
 	}}
 	r := failingReconciler(t, interceptor.Funcs{}, m, pod)
-	res, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathTail(pollInterval))
+	res, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathCursor(pollInterval))
 	if err != nil || !handled {
 		t.Fatalf("a marker inside the grace must end the pass cleanly, got (handled=%v, %v)", handled, err)
 	}
@@ -401,7 +486,7 @@ func TestReapZombieWorker_PodDeleteFailure(t *testing.T) {
 			return errBoom
 		},
 	}, m, pod)
-	_, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathTail(2*zombieGrace))
+	_, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathCursor(2*zombieGrace))
 	if !handled || !errors.Is(err, errBoom) {
 		t.Fatalf("a pod delete failure must propagate, got (handled=%v, %v)", handled, err)
 	}
