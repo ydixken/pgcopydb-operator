@@ -374,7 +374,7 @@ func TestScanWorkerLogs_CursorSurvivesReads(t *testing.T) {
 		firstAt.Format(time.RFC3339Nano) + ` {"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n"}
 	r := &MigrationReconciler{Logs: logs}
 	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "worker", UID: "job-uid"}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobKindWorker, UID: "job-uid"}}
 
 	scan, err := r.scanWorkerLogs(context.Background(), m, job)
 	if err != nil {

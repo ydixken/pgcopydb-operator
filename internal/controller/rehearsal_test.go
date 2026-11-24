@@ -689,6 +689,7 @@ var _ = Describe("Verification rehearsal", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		r.Progress = &fakeProgress{}
 		passGate(ctx, r, name)
 		Expect(fetchJob(ctx, name+"-run-1")).NotTo(BeNil())
 		return r, fake

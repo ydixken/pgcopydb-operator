@@ -281,6 +281,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 	followReconciler := func(fake *fakeSentinel) *MigrationReconciler {
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Progress = &fakeProgress{}
 		return r
 	}
 

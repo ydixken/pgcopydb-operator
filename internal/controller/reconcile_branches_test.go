@@ -147,6 +147,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		r.Progress = &fakeProgress{}
 		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
@@ -256,6 +257,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		r.Progress = &fakeProgress{}
 		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
@@ -289,6 +291,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		r.Progress = &fakeProgress{}
 		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)

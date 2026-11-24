@@ -429,7 +429,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		got = reconcileAndGet(ctx, r2, name)
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
 		Expect(logs.lastSince).NotTo(BeNil())
-		Expect(logs.lastPreviousPodUID).To(Equal(got.Status.WorkerLogCursor.PodUID))
+		Expect(logs.lastPreviousPodUID).To(Equal(types.UID(got.Status.WorkerLogCursor.PodUID)))
 	})
 
 	It("does not wait for rows in a table whose data the clone skips", func() {
@@ -1337,6 +1337,7 @@ var _ = Describe("Migration Controller attempt phase", func() {
 		fake := &fakeSentinel{}
 		r := newReconciler()
 		r.Sentinel, r.Logs = fake, cloneDoneLogs()
+		r.Progress = &fakeProgress{}
 		m := validMigration(name)
 		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: mode}
