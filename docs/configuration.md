@@ -259,7 +259,9 @@ The same source changes can give a different target in the two modes.
 These are the cases:
 
 - A transaction starts before the cutover end position and commits after it.
-  `performance` does not apply it, unless the transaction committed before the operator set the end position.
+  `performance` stops at a cut: the larger of the end position and the highest commit position that the workers applied before the end position arrived.
+  It does not apply a transaction that commits above the cut.
+  Thus a commit above the end position that a worker applied before the end position arrived stays applied.
 - The definition of a table changes during the live migration.
   `performance` decodes the changes with the new definition.
   `sqlite` decodes them with the first definition that it received.
