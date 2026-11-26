@@ -2240,10 +2240,6 @@ spec:
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers
                 > 1)'
-            - message: follow.mode performance requires engine pgcopydb
-              rule: '!(has(self.follow) && has(self.follow.mode) && self.follow.mode
-                == ''performance'') || (has(self.engine) ? self.engine : ''pgcopydb'')
-                == ''pgcopydb'''
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
@@ -4951,10 +4947,6 @@ spec:
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers
                 > 1)'
-            - message: follow.mode performance requires engine pgcopydb
-              rule: '!(has(self.follow) && has(self.follow.mode) && self.follow.mode
-                == ''performance'') || (has(self.engine) ? self.engine : ''pgcopydb'')
-                == ''pgcopydb'''
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
