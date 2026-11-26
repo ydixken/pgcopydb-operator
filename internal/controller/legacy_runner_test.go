@@ -20,20 +20,49 @@ import (
 	"encoding/json"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
+// The fixture's own values, which no other test can change.
+const (
+	legacyPasswordSecret = "sec"
+	legacyPasswordKey    = "password"
+	legacyHotTable       = "public.orders"
+)
+
+// legacyRunnerMigration is a private copy of the shared builder fixtures, so an
+// edit of those cannot move the golden files below.
+func legacyRunnerMigration(follow v1beta1.FollowOptions) *v1beta1.Migration {
+	return &v1beta1.Migration{
+		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
+		Spec: v1beta1.MigrationSpec{
+			Source: v1beta1.PostgresConnection{
+				Host: "s", Database: "d", Username: "u",
+				PasswordSecretRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: legacyPasswordSecret}, Key: legacyPasswordKey,
+				},
+			},
+			Target: v1beta1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
+			Follow: &follow,
+		},
+	}
+}
+
 // legacyRunnerGoldens renders the follow Jobs that a runner pinned to 9d8b660
 // must keep getting, keyed by golden file name. The files were recorded before
-// spec.follow.mode existed, so they pin a Migration without a mode to today's bytes.
+// spec.follow.mode existed, so they pin a Migration without a mode to those bytes.
 func legacyRunnerGoldens(t *testing.T) map[string][]byte {
 	t.Helper()
-	workers := walWorkersMigration()
-	workers.Spec.Follow.Plugin = pgoutputPlugin
-	workers.Spec.Follow.WalWorkers = 3
+	workers := legacyRunnerMigration(v1beta1.FollowOptions{
+		Enabled: true, Plugin: pgoutputPlugin, WalWorkers: 3,
+		HighTrafficTables: []string{legacyHotTable, "public.events"},
+	})
 	out := map[string][]byte{}
 	for name, m := range map[string]*v1beta1.Migration{
-		"follow":     followPasswordMigration(),
+		"follow":     legacyRunnerMigration(v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}),
 		"walworkers": workers,
 	} {
 		job, err := buildJob(m, "img", 1)
@@ -47,8 +76,8 @@ func legacyRunnerGoldens(t *testing.T) map[string][]byte {
 		out["worker-job-"+name+".json"] = append(js, '\n')
 		out["preflight-"+name+".sh"] = []byte(preflightScriptFor(m))
 	}
-	// No progress gate: its version list moves with every pin bump.
-	verify, err := buildVerifyJob(workers, "img", "")
+	// A stand-in gate pins the clone-progress wiring; the real one moves with every pin bump.
+	verify, err := buildVerifyJob(workers, "img", "echo gate\n")
 	if err != nil {
 		t.Fatal(err)
 	}

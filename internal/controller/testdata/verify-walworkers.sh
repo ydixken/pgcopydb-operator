@@ -69,6 +69,12 @@ for origin in pgcopydb_ns_m_a22ad55b pgcopydb_ns_m_a22ad55b_w1 pgcopydb_ns_m_a22
   echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap origin=$origin"
   [ "$gap" -eq 0 ] || behind=$((behind + 1))
 done
+clone_progress=$( { set +e
+echo gate
+} 2>/dev/null | tr -d '\n' ) || true
+if [ -n "$clone_progress" ]; then
+  printf 'clone-progress: %s\n' "$clone_progress"
+fi
 if [ "$endpos" = "0/0" ]; then
   echo "the work dir reports no cutover endpos, so the origins have nothing to be measured against. Deciding by content."
 elif [ "$behind" -eq 0 ]; then
