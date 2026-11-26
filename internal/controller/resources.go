@@ -1003,6 +1003,15 @@ else
 fi
 `
 
+// followModeRunnerBlock fails closed: a pgcopydb without the flag ignores
+// PGCOPYDB_FOLLOW_MODE and follows in sqlite mode.
+const followModeRunnerBlock = `if pgcopydb clone --help 2>&1 | grep -qF -- '--follow-mode'; then
+  echo "ok: runner pgcopydb accepts --follow-mode"
+else
+  note "preflight: spec.follow.mode performance needs follow mode support, and the pgcopydb in runner image $` + runnerImageEnv + ` lacks it (pgcopydb clone --help does not list --follow-mode); remove the spec.runner.image pin, or recreate the Migration without spec.follow.mode"
+fi
+`
+
 // walWorkersRunnerBlock fails closed: a pgcopydb without the flag ignores
 // PGCOPYDB_WAL_WORKERS and runs a single stream.
 const walWorkersRunnerBlock = `if pgcopydb clone --help 2>&1 | grep -qF -- '` + pgcopydb.WalWorkersFlag + `'; then
@@ -1534,6 +1543,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	b.WriteString(rlsAuditBlock)
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
+		b.WriteString(followModeRunnerBlock) // control O16: the O5 block for every follow Migration
 		if m.Spec.Follow.WalWorkers > 1 {
 			b.WriteString(walWorkersBlock(m.Spec.Follow))
 		} else {
