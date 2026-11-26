@@ -383,7 +383,7 @@ const PluginWal2json = "wal2json"
 // +kubebuilder:validation:XValidation:rule="!has(self.walWorkers) || self.walWorkers <= 1 || !has(self.slotName) || size(self.slotName) <= 51",message="walWorkers above 1 requires a slotName of at most 51 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.highTrafficTables) || size(self.highTrafficTables) == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables) <= self.walWorkers)",message="highTrafficTables requires walWorkers above 1 and at most walWorkers entries"
 // +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'performance' || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables) == 0) && (!has(self.highTrafficTables) || size(self.highTrafficTables) == 0))",message="mode performance requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or highTrafficTables"
-// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'performance' || !has(self.walWorkers) || self.walWorkers <= 1",message="mode performance requires walWorkers unset or 1; use mode sqlite for more than one WAL worker"
+// +kubebuilder:validation:XValidation:rule="!has(self.walWorkers) || self.walWorkers <= 1",message="mode performance requires walWorkers unset or 1; use mode sqlite for more than one WAL worker"
 // +kubebuilder:validation:XValidation:rule="!has(self.slotName) || !self.slotName.matches('_[wt][0-9]+$')",message="slotName must not end in _w<digits> or _t<digits>, which WAL workers use for their slots and publications"
 type FollowOptions struct {
 	// enabled turns the migration into a live one.

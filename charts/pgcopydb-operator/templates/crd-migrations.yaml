@@ -523,8 +523,7 @@ spec:
                     == 0))'
                 - message: mode performance requires walWorkers unset or 1; use mode
                     sqlite for more than one WAL worker
-                  rule: '!has(self.mode) || self.mode != ''performance'' || !has(self.walWorkers)
-                    || self.walWorkers <= 1'
+                  rule: '!has(self.walWorkers) || self.walWorkers <= 1'
                 - message: slotName must not end in _w<digits> or _t<digits>, which
                     WAL workers use for their slots and publications
                   rule: '!has(self.slotName) || !self.slotName.matches(''_[wt][0-9]+$'')'
@@ -3234,8 +3233,7 @@ spec:
                     == 0))'
                 - message: mode performance requires walWorkers unset or 1; use mode
                     sqlite for more than one WAL worker
-                  rule: '!has(self.mode) || self.mode != ''performance'' || !has(self.walWorkers)
-                    || self.walWorkers <= 1'
+                  rule: '!has(self.walWorkers) || self.walWorkers <= 1'
                 - message: slotName must not end in _w<digits> or _t<digits>, which
                     WAL workers use for their slots and publications
                   rule: '!has(self.slotName) || !self.slotName.matches(''_[wt][0-9]+$'')'
