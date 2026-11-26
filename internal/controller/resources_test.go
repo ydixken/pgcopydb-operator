@@ -263,21 +263,26 @@ func TestBuildJobGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got = append(got, '\n')
-			path := filepath.Join("testdata", "worker-job-"+name+".json")
-			if os.Getenv("UPDATE_GOLDEN") != "" {
-				if err := os.WriteFile(path, got, 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(want) != string(got) {
-				t.Fatalf("the worker Job drifted from %s; review the change, then rerun with UPDATE_GOLDEN=1 to accept it", path)
-			}
+			assertGolden(t, "worker-job-"+name+".json", append(got, '\n'))
 		})
+	}
+}
+
+// assertGolden compares got with testdata/name; UPDATE_GOLDEN=1 rewrites it first.
+func assertGolden(t *testing.T, name string, got []byte) {
+	t.Helper()
+	path := filepath.Join("testdata", name)
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(want) != string(got) {
+		t.Fatalf("the output drifted from %s; review the change, then rerun with UPDATE_GOLDEN=1 to accept it", path)
 	}
 }
 
