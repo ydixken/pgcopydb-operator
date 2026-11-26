@@ -1548,9 +1548,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	b.WriteString(rlsAuditBlock)
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
-		if performanceMode(m) {
-			b.WriteString(followModeRunnerBlock)
-		}
+		b.WriteString(followModeRunnerBlock)
 		if m.Spec.Follow.WalWorkers > 1 {
 			b.WriteString(walWorkersBlock(m.Spec.Follow))
 		} else {
