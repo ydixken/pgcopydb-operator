@@ -186,6 +186,11 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_FOLLOW_MODE", Value: v1beta1.FollowModePerformance})
 	}
+	// Control O16: every sqlite follow Migration, mode unset or sqlite, gets PGCOPYDB_FOLLOW_MODE=sqlite.
+	if followEnabled(m) && !performanceMode(m) {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_FOLLOW_MODE", Value: v1beta1.FollowModeSQLite})
+	}
 	// validateWalWorkers above guarantees follow is enabled when walWorkers is above 1,
 	// and that highTrafficTables is set only then.
 	if f := m.Spec.Follow; f != nil && f.WalWorkers > 1 {
