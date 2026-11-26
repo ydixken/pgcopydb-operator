@@ -1693,8 +1693,11 @@ func TestBuildPreflightJob_FollowModeEnv(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := envValue(job.Spec.Template.Spec.Containers[0].Env, runnerImageEnv); got != want {
-			t.Fatalf("mode %q: %s = %q, want %q", mode, runnerImageEnv, got, want)
+		env := job.Spec.Template.Spec.Containers[0].Env
+		// envValue reads an absent and an empty variable alike, so presence is checked on its own.
+		set := slices.ContainsFunc(env, func(e corev1.EnvVar) bool { return e.Name == runnerImageEnv })
+		if got := envValue(env, runnerImageEnv); set != (want != "") || got != want {
+			t.Fatalf("mode %q: %s set=%t value %q, want value %q", mode, runnerImageEnv, set, got, want)
 		}
 	}
 }
