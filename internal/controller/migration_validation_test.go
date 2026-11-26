@@ -398,6 +398,10 @@ var _ = Describe("Migration CRD validation", func() {
 		changed.Spec.Follow.WalWorkers = 2
 		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
 
+		changed = fresh()
+		changed.Spec.Follow.Mode = v1beta1.FollowModePerformance
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
+
 		// Control: clone tuning and the cutover trigger stay mutable.
 		changed = fresh()
 		changed.Spec.Clone.TableJobs = 8
@@ -641,24 +645,77 @@ var _ = Describe("Migration CRD validation", func() {
 			entry("workers with slot w1", "w1-only", ww(2, slotNamed("w1")), ""),
 		}
 	}
-	DescribeTable("walWorkers and highTrafficTables rules",
-		func(gv schema.GroupVersion, name string, follow map[string]any, wantErr string) {
-			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration(name))
+	admitFollow := func(gv schema.GroupVersion, name string, follow map[string]any, wantErr string) {
+		GinkgoHelper()
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration(name))
+		Expect(err).NotTo(HaveOccurred())
+		u := &unstructured.Unstructured{Object: obj}
+		u.SetGroupVersionKind(gv.WithKind("Migration"))
+		Expect(unstructured.SetNestedMap(u.Object, follow, "spec", "follow")).To(Succeed())
+		err = k8sClient.Create(ctx, u)
+		if wantErr == "" {
 			Expect(err).NotTo(HaveOccurred())
-			u := &unstructured.Unstructured{Object: obj}
-			u.SetGroupVersionKind(gv.WithKind("Migration"))
-			Expect(unstructured.SetNestedMap(u.Object, follow, "spec", "follow")).To(Succeed())
-			err = k8sClient.Create(ctx, u)
-			if wantErr == "" {
-				Expect(err).NotTo(HaveOccurred())
-				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
-				return
-			}
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
-			Expect(err).To(MatchError(ContainSubstring(wantErr)))
-		},
+			Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+			return
+		}
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring(wantErr)))
+	}
+	DescribeTable("walWorkers and highTrafficTables rules", admitFollow,
 		walWorkersEntries(v1beta1.GroupVersion),
 		walWorkersEntries(v1alpha1.GroupVersion),
+	)
+
+	const m1 = "mode performance requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or highTrafficTables"
+	const m2 = "mode performance requires walWorkers unset or 1; use mode sqlite for more than one WAL worker"
+	followModeEntries := func(gv schema.GroupVersion) []TableEntry {
+		const insertOnlyWorkers = "walWorkers above 1 requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or insertOnlyTables"
+		const perf, sqlite = v1beta1.FollowModePerformance, v1beta1.FollowModeSQLite
+		type fo = v1beta1.FollowOptions
+		hot, audit := []string{"app.a", "app.b"}, []string{"app.journal"}
+		unlogged := []v1beta1.UnloggedTable{{Table: "app.scratch", Mode: v1beta1.UnloggedSchemaOnly}}
+		entry := func(desc, name string, f fo, wantErr string) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-fm-"+name+"-"+gv.Version, f, wantErr)
+		}
+		return []TableEntry{
+			entry("mode unset", "unset", fo{Enabled: true}, ""),
+			entry("sqlite", "sqlite", fo{Enabled: true, Mode: sqlite}, ""),
+			entry("performance", "perf", fo{Enabled: true, Mode: perf}, ""),
+			entry("performance with explicit pgoutput", "perf-pgoutput", fo{Enabled: true, Mode: perf, Plugin: v1beta1.PluginPGOutput}, ""),
+			entry("performance with one worker", "perf-one", fo{Enabled: true, Mode: perf, WalWorkers: 1}, ""),
+			entry("performance with insertOnlyTables", "perf-insert-only", fo{Enabled: true, Mode: perf, InsertOnlyTables: audit}, ""),
+			entry("performance with a slotName", "perf-slot", fo{Enabled: true, Mode: perf, SlotName: "perf_slot"}, ""),
+			entry("sqlite with eight workers and high-traffic tables", "sqlite-hot",
+				fo{Enabled: true, Mode: sqlite, WalWorkers: 8, HighTrafficTables: hot}, ""),
+			entry("mode unset with eight workers and high-traffic tables", "unset-hot",
+				fo{Enabled: true, WalWorkers: 8, HighTrafficTables: hot}, ""),
+			entry("sqlite with wal2json", "sqlite-wal2json", fo{Enabled: true, Mode: sqlite, Plugin: v1beta1.PluginWal2json}, ""),
+			entry("sqlite with a publication", "sqlite-pub", fo{Enabled: true, Mode: sqlite, Publication: "external_pub"}, ""),
+			entry("unknown mode", "fast", fo{Enabled: true, Mode: "fast"}, "Unsupported value"),
+			entry("performance with follow disabled", "perf-disabled", fo{Mode: perf}, m1),
+			entry("performance with wal2json", "perf-wal2json", fo{Enabled: true, Mode: perf, Plugin: v1beta1.PluginWal2json}, m1),
+			entry("performance with test_decoding", "perf-test-decoding", fo{Enabled: true, Mode: perf, Plugin: "test_decoding"}, m1),
+			entry("performance with a publication", "perf-pub", fo{Enabled: true, Mode: perf, Publication: "external_pub"}, m1),
+			entry("performance with unloggedTables", "perf-unlogged", fo{Enabled: true, Mode: perf, UnloggedTables: unlogged}, m1),
+			// The error also holds m2.
+			entry("performance with two workers and a high-traffic table", "perf-hot",
+				fo{Enabled: true, Mode: perf, WalWorkers: 2, HighTrafficTables: hot[:1]}, m1),
+			entry("performance with two workers", "perf-two", fo{Enabled: true, Mode: perf, WalWorkers: 2}, m2),
+			entry("performance with sixteen workers", "perf-max", fo{Enabled: true, Mode: perf, WalWorkers: 16}, m2),
+			// The error also holds m2.
+			entry("performance with two workers and insertOnlyTables", "perf-two-insert-only",
+				fo{Enabled: true, Mode: perf, WalWorkers: 2, InsertOnlyTables: audit}, insertOnlyWorkers),
+		}
+	}
+	// Typed options, sent as unstructured objects of each served version.
+	DescribeTable("follow.mode rules",
+		func(gv schema.GroupVersion, name string, f v1beta1.FollowOptions, wantErr string) {
+			follow, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&f)
+			Expect(err).NotTo(HaveOccurred())
+			admitFollow(gv, name, follow, wantErr)
+		},
+		followModeEntries(v1beta1.GroupVersion),
+		followModeEntries(v1alpha1.GroupVersion),
 	)
 
 	walWorkersAllDatabasesEntries := func(gv schema.GroupVersion) []TableEntry {
@@ -691,6 +748,46 @@ var _ = Describe("Migration CRD validation", func() {
 		},
 		walWorkersAllDatabasesEntries(v1beta1.GroupVersion),
 		walWorkersAllDatabasesEntries(v1alpha1.GroupVersion),
+	)
+
+	followModeSpecEntries := func(gv schema.GroupVersion) []TableEntry {
+		entry := func(desc, name, mode string, engine v1beta1.MigrationEngine, allDatabases, follow bool, wantErr string) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-fm-spec-"+name+"-"+gv.Version, mode, engine, allDatabases, follow, wantErr)
+		}
+		const perf, sqlite = v1beta1.FollowModePerformance, v1beta1.FollowModeSQLite
+		return []TableEntry{
+			entry("performance with rpgmigrate", "perf-rpg", perf, v1beta1.MigrationEngineRPGMigrate, false, true,
+				"follow.mode performance requires engine pgcopydb"),
+			entry("performance with pgcopydb", "perf-pgcopydb", perf, v1beta1.MigrationEnginePGCopyDB, false, true, ""),
+			entry("performance with the engine unset", "perf-unset", perf, "", false, true, ""),
+			// Admitted as today: the controller fails it with UnsupportedEngine.
+			entry("sqlite with rpgmigrate", "sqlite-rpg", sqlite, v1beta1.MigrationEngineRPGMigrate, false, true, ""),
+			entry("performance with allDatabases", "perf-alldb", perf, "", true, true,
+				"allDatabases cannot be combined with follow.enabled"),
+			entry("performance with allDatabases and follow disabled", "perf-alldb-off", perf, "", true, false, m1),
+		}
+	}
+	DescribeTable("follow.mode rules on the spec",
+		func(gv schema.GroupVersion, name, mode string, engine v1beta1.MigrationEngine, allDatabases, follow bool, wantErr string) {
+			m := validMigration(name)
+			m.Spec.Engine = engine
+			m.Spec.Clone.AllDatabases = allDatabases
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: follow, Mode: mode}
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(m)
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			err = k8sClient.Create(ctx, u)
+			if wantErr == "" {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring(wantErr)))
+		},
+		followModeSpecEntries(v1beta1.GroupVersion),
+		followModeSpecEntries(v1alpha1.GroupVersion),
 	)
 
 	// spec.follow is immutable, so without CRD validation ratcheting a Migration

@@ -362,6 +362,13 @@ type RunnerSpec struct {
 // PluginPGOutput names PostgreSQL's built-in logical decoding plugin.
 const PluginPGOutput = "pgoutput"
 
+// FollowModeSQLite and FollowModePerformance are the values of spec.follow.mode;
+// an unset mode means sqlite.
+const (
+	FollowModeSQLite      = "sqlite"
+	FollowModePerformance = "performance"
+)
+
 // PluginWal2json is the one decoding plugin the operator special-cases: it
 // ships outside PostgreSQL, so it carries both the preflight's cannot-verify
 // note and the numeric-as-string knob.
@@ -375,6 +382,8 @@ const PluginWal2json = "wal2json"
 // +kubebuilder:validation:XValidation:rule="!has(self.walWorkers) || self.walWorkers <= 1 || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables) == 0) && (!has(self.insertOnlyTables) || size(self.insertOnlyTables) == 0))",message="walWorkers above 1 requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or insertOnlyTables"
 // +kubebuilder:validation:XValidation:rule="!has(self.walWorkers) || self.walWorkers <= 1 || !has(self.slotName) || size(self.slotName) <= 51",message="walWorkers above 1 requires a slotName of at most 51 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.highTrafficTables) || size(self.highTrafficTables) == 0 || (has(self.walWorkers) && self.walWorkers > 1 && size(self.highTrafficTables) <= self.walWorkers)",message="highTrafficTables requires walWorkers above 1 and at most walWorkers entries"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'performance' || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables) == 0) && (!has(self.highTrafficTables) || size(self.highTrafficTables) == 0))",message="mode performance requires follow.enabled, plugin pgoutput, no publication, and no unloggedTables or highTrafficTables"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'performance' || !has(self.walWorkers) || self.walWorkers <= 1",message="mode performance requires walWorkers unset or 1; use mode sqlite for more than one WAL worker"
 // +kubebuilder:validation:XValidation:rule="!has(self.slotName) || !self.slotName.matches('_[wt][0-9]+$')",message="slotName must not end in _w<digits> or _t<digits>, which WAL workers use for their slots and publications"
 type FollowOptions struct {
 	// enabled turns the migration into a live one.
@@ -419,6 +428,13 @@ type FollowOptions struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	ApplyGroupTransactions int32 `json:"applyGroupTransactions,omitempty"`
+
+	// mode selects how pgcopydb follows changes (PGCOPYDB_FOLLOW_MODE). Unset or
+	// sqlite keeps the SQLite spool, and one slot per worker above one worker.
+	// performance spools pgoutput as received and applies it on one slot.
+	// +kubebuilder:validation:Enum=sqlite;performance
+	// +optional
+	Mode string `json:"mode,omitempty"`
 
 	// walWorkers is the number of parallel CDC streams pgcopydb runs, each with
 	// its own replication slot and target replication origin. Unset or 1 keeps
@@ -746,6 +762,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="allDatabases cannot be combined with follow.enabled: pgcopydb ignores follow in this mode"
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.verification) && has(self.verification.data) && self.verification.data)",message="allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode"
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.follow) && has(self.follow.walWorkers) && self.follow.walWorkers > 1)",message="follow.walWorkers above 1 cannot be combined with clone.allDatabases"
+// +kubebuilder:validation:XValidation:rule="!(has(self.follow) && has(self.follow.mode) && self.follow.mode == 'performance') || (has(self.engine) ? self.engine : 'pgcopydb') == 'pgcopydb'",message="follow.mode performance requires engine pgcopydb"
 // +kubebuilder:validation:XValidation:rule="(has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)",message="dryRun is immutable: create a separate Migration for the real run"
 // +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases) == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)",message="allDatabases is immutable: create a separate Migration"
 // +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes) == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)",message="clone.deferIndexes is immutable: create a separate Migration"
