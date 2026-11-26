@@ -211,6 +211,67 @@ Partial content comparisons cannot prove that the target applied every INSERT.
 If the origin position differs, the drain check fails and retains the slot.
 The operator does not infer a successful drain from partial checksums.
 
+## Follow mode
+
+`spec.follow.mode` selects how pgcopydb receives and applies the changes of a live migration.
+
+```yaml
+spec:
+  follow:
+    enabled: true
+    mode: performance      # sqlite (default) | performance
+```
+
+The two values have these effects:
+
+- `sqlite` keeps the changes in SQLite files on the work volume.
+  When `walWorkers` is more than 1, each WAL worker uses its own replication slot.
+- `performance` writes the pgoutput stream to a spool on the work volume as it arrives.
+  It uses one replication slot and applies the changes from the spool.
+
+When `mode` is not set, the migration uses `sqlite`.
+A Migration that you created before the operator had this field uses `sqlite`.
+
+With `mode: performance`, these rules apply:
+
+- `follow.enabled` MUST be `true`.
+- The plugin MUST be `pgoutput`.
+- `spec.follow.publication` MUST be empty.
+- `unloggedTables` and `highTrafficTables` MUST be empty.
+- `walWorkers` MUST be unset or 1.
+- `spec.engine` MUST be `pgcopydb`.
+- `clone.allDatabases` MUST be `false`, because `allDatabases` with `follow.enabled` is not permitted.
+
+You can use `insertOnlyTables` with `mode: performance`.
+Admission rejects a spec that breaks these rules.
+
+The mode is part of `spec.follow`, so it is immutable.
+To change the mode, create a new Migration.
+
+The operator sets `PGCOPYDB_FOLLOW_MODE=performance` in the worker Job only for `mode: performance`.
+For `sqlite` or no mode, the operator does not set the variable, and the worker Job does not change.
+
+> [!warning]
+> `mode: performance` needs a runner image with a pgcopydb that shows `--follow-mode` in `pgcopydb clone --help`.
+> An older pgcopydb ignores the variable and uses `sqlite`.
+
+The same source changes can give a different target in the two modes.
+These are the cases:
+
+- A transaction starts before the cutover end position and commits after it.
+  `performance` does not apply it, unless the transaction committed before the operator set the end position.
+- The definition of a table changes during the live migration.
+  `performance` decodes the changes with the new definition.
+  `sqlite` decodes them with the first definition that it received.
+- An UPDATE or DELETE has a key column that has no value in the change.
+  `performance` stops the run with an error.
+  In `sqlite`, the statement can change more target rows than the source changed.
+- The text of a key value changes with a session setting, for example `DateStyle`.
+  `performance` sets these settings to fixed values before it receives changes.
+  `sqlite` does not set them.
+- A source transaction has a replication origin.
+  In `sqlite`, such a transaction can stop the live migration, or the target does not get it.
+
 ## WAL workers
 
 By default, one stream receives the source changes and one connection applies them to the target.
@@ -239,6 +300,7 @@ With `walWorkers` above 1, these rules apply:
 
 - `follow.enabled` MUST be `true`.
 - The plugin MUST be `pgoutput`.
+- `spec.follow.mode` MUST be unset or `sqlite`.
 - `spec.follow.publication` MUST be empty.
   pgcopydb creates one publication for each table, with the name `<slot>_t<table oid>`.
 - `unloggedTables` and `insertOnlyTables` MUST be empty.

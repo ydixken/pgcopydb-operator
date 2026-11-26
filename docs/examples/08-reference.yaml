@@ -91,6 +91,7 @@ spec:
     wal2jsonNumericAsString: true  # wal2json only: keep numeric precision in JSON
     replayNoOpUpdates: true     # replay empty UPDATEs so target triggers fire
     applyGroupTransactions: 100  # source transactions per target commit; 1 commits each alone
+    # mode: performance        # sqlite (default) | performance: pgoutput only, no publication, walWorkers 1
     # walWorkers: 4             # parallel CDC streams, 1 to 16; needs pgoutput, no publication
     # highTrafficTables: ["public.orders"]  # each listed table gets a worker of its own
     allowMissingReplicaIdentity: ["public.audit_log"]  # read-only tables only, or "*"
