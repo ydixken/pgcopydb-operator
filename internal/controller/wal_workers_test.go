@@ -165,17 +165,7 @@ func TestBuildJob_WalWorkersEnv(t *testing.T) {
 		t.Errorf("%s = %q, want public.orders,public.events", tables, got)
 	}
 
-	for name, build := range map[string]func() (*batchv1.Job, error){
-		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
-		jobKindGate:      func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
-		jobKindCleanup:   func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
-		jobKindCatalog:   func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") },
-		"compare data":   func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) },
-		"compare schema": func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
-		"reown":          func() (*batchv1.Job, error) { return buildReownJob(m, "img") },
-		jobKindRehearsal: func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
-	} {
+	for name, build := range nonWorkerJobs(m) {
 		job, err := build()
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -195,6 +185,21 @@ func TestBuildJob_WalWorkersEnv(t *testing.T) {
 	env = job.Spec.Template.Spec.Containers[0].Env
 	if envValue(env, workers) != "" || envValue(env, tables) != "" {
 		t.Errorf("walWorkers 1 must set neither variable")
+	}
+}
+
+// nonWorkerJobs builds every Job of m but the worker Job, for tests that pin a worker-only variable.
+func nonWorkerJobs(m *v1beta1.Migration) map[string]func() (*batchv1.Job, error) {
+	return map[string]func() (*batchv1.Job, error){
+		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		jobKindGate:      func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
+		jobKindCleanup:   func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+		jobKindCatalog:   func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") },
+		"compare data":   func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) },
+		"compare schema": func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+		"reown":          func() (*batchv1.Job, error) { return buildReownJob(m, "img") },
+		jobKindRehearsal: func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
 	}
 }
 

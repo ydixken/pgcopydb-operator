@@ -80,6 +80,11 @@ func followEnabled(m *v1beta1.Migration) bool {
 	return m.Spec.Follow != nil && m.Spec.Follow.Enabled
 }
 
+// performanceMode is false for an unset mode, which is sqlite.
+func performanceMode(m *v1beta1.Migration) bool {
+	return m.Spec.Follow != nil && m.Spec.Follow.Mode == v1beta1.FollowModePerformance
+}
+
 func effectiveSlotName(m *v1beta1.Migration) string {
 	return pgcopydb.EffectiveSlotName(&m.Spec, m.Namespace, m.Name)
 }

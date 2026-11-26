@@ -181,6 +181,11 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 			Name: "PGCOPYDB_APPLY_GROUP_TXNS", Value: fmt.Sprint(m.Spec.Follow.ApplyGroupTransactions),
 		})
 	}
+	// An unset or sqlite mode sets nothing, so a sqlite Migration runs alike on an older runner.
+	if performanceMode(m) {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_FOLLOW_MODE", Value: v1beta1.FollowModePerformance})
+	}
 	// validateWalWorkers above guarantees follow is enabled when walWorkers is above 1,
 	// and that highTrafficTables is set only then.
 	if f := m.Spec.Follow; f != nil && f.WalWorkers > 1 {

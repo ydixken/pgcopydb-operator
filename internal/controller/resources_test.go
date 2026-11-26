@@ -373,6 +373,69 @@ func TestBuildJob_ApplyGroupTransactions(t *testing.T) {
 	}
 }
 
+// Only the worker Job of a performance Migration carries the mode; unset and sqlite render today's Jobs.
+func TestBuildJob_FollowModeEnv(t *testing.T) {
+	const name = "PGCOPYDB_FOLLOW_MODE"
+	migration := func(mode string, workers int32, tables ...string) *v1beta1.Migration {
+		m := passwordMigration()
+		m.Spec.Clone.NoOwner = true
+		m.Spec.Clone.OwnerAfterRestore = reownTestOwner
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Mode: mode, WalWorkers: workers, HighTrafficTables: tables}
+		return m
+	}
+	carries := func(job *batchv1.Job) bool {
+		return slices.ContainsFunc(job.Spec.Template.Spec.Containers, func(c corev1.Container) bool {
+			return slices.ContainsFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == name })
+		})
+	}
+	worker := func(m *v1beta1.Migration) *batchv1.Job {
+		t.Helper()
+		job, err := buildJob(m, "img", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	noOtherJob := func(m *v1beta1.Migration) {
+		t.Helper()
+		for kind, build := range nonWorkerJobs(m) {
+			job, err := build()
+			if err != nil {
+				t.Fatalf("%s: %v", kind, err)
+			}
+			if carries(job) {
+				t.Errorf("mode %q: %s Job carries %s", m.Spec.Follow.Mode, kind, name)
+			}
+		}
+	}
+
+	perf := migration(v1beta1.FollowModePerformance, 0)
+	if got := envValue(worker(perf).Spec.Template.Spec.Containers[0].Env, name); got != v1beta1.FollowModePerformance {
+		t.Errorf("performance worker Job: %s = %q, want performance", name, got)
+	}
+	noOtherJob(perf)
+
+	for _, tc := range []struct {
+		desc    string
+		workers int32
+		tables  []string
+	}{
+		{"one worker", 0, nil},
+		{"three workers", 3, []string{"public.ledger"}},
+	} {
+		unset := worker(migration("", tc.workers, tc.tables...))
+		sqlite := migration(v1beta1.FollowModeSQLite, tc.workers, tc.tables...)
+		if carries(unset) || carries(worker(sqlite)) {
+			t.Errorf("%s: a sqlite worker Job carries %s", tc.desc, name)
+		}
+		if !reflect.DeepEqual(worker(sqlite), unset) {
+			t.Errorf("%s: the sqlite worker Job differs from the one with the mode unset", tc.desc)
+		}
+		noOtherJob(sqlite)
+		noOtherJob(migration("", tc.workers, tc.tables...))
+	}
+}
+
 // TestBuildVerifyJob_AuthAndPredicate covers the live-found verify-gate
 // defects: the script must run behind the passfile prelude (bare /bin/sh
 // failed auth and falsely refuted every drain), the fast path must pass only
