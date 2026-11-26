@@ -34,7 +34,9 @@ import (
 )
 
 // patchedVersion is the allowlisted fixture version across these tests.
-const patchedVersion = "0.18.159.g9d8b660"
+const patchedVersion = "0.18.168.ge8eec0f"
+
+const publicationSkipPatchedVersion = "0.18.159.g9d8b660"
 
 const walWorkersPatchedVersion = "0.18.157.g5fa0950"
 
@@ -132,7 +134,7 @@ func TestNewFromExec_DropsInvalidVersions(t *testing.T) {
 }
 
 func TestGateScript(t *testing.T) {
-	p := NewFromExec(&fakeExec{}, []string{patchedVersion, walWorkersPatchedVersion, comparePatchedVersion, deferIndexesPatchedVersion, constraintPatchedVersion, allDatabasesPatchedVersion, splitResumePatchedVersion, tcpKeepalivePatchedVersion, snapshotPatchedVersion, outputDBPatchedVersion, applyGroupPatchedVersion, statusIntervalPatchedVersion, identifySystemPatchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
+	p := NewFromExec(&fakeExec{}, []string{patchedVersion, publicationSkipPatchedVersion, walWorkersPatchedVersion, comparePatchedVersion, deferIndexesPatchedVersion, constraintPatchedVersion, allDatabasesPatchedVersion, splitResumePatchedVersion, tcpKeepalivePatchedVersion, snapshotPatchedVersion, outputDBPatchedVersion, applyGroupPatchedVersion, statusIntervalPatchedVersion, identifySystemPatchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
 	s := p.GateScript()
 	for _, want := range []string{
 		// The pattern list opens with "(", and that is asserted on the text
@@ -143,7 +145,7 @@ func TestGateScript(t *testing.T) {
 		// the bug, which is the one thing this test exists to prevent. The
 		// verify Job embeds this script inside $( ), where the bare form is
 		// ambiguous, so the leading "(" is the property, not the parse.
-		"\n(0.18.159.g9d8b660|0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd) pgcopydb list progress",
+		"\n(0.18.168.ge8eec0f|0.18.159.g9d8b660|0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd) pgcopydb list progress",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
 		"v=${v#pgcopydb version }",
 	} {
@@ -199,55 +201,57 @@ func TestGateScript_UnderSh(t *testing.T) {
 	if err != nil {
 		t.Skipf("no sh available: %v", err)
 	}
-	p := NewFromExec(&fakeExec{}, []string{patchedVersion, walWorkersPatchedVersion, comparePatchedVersion, deferIndexesPatchedVersion, constraintPatchedVersion, allDatabasesPatchedVersion, splitResumePatchedVersion, tcpKeepalivePatchedVersion, snapshotPatchedVersion, outputDBPatchedVersion, applyGroupPatchedVersion, statusIntervalPatchedVersion, identifySystemPatchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
+	p := NewFromExec(&fakeExec{}, []string{patchedVersion, publicationSkipPatchedVersion, walWorkersPatchedVersion, comparePatchedVersion, deferIndexesPatchedVersion, constraintPatchedVersion, allDatabasesPatchedVersion, splitResumePatchedVersion, tcpKeepalivePatchedVersion, snapshotPatchedVersion, outputDBPatchedVersion, applyGroupPatchedVersion, statusIntervalPatchedVersion, identifySystemPatchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
 	for version, want := range map[string]string{
-		patchedVersion:               `{"tables":{"total":2,"done":1}}` + "\n",
-		walWorkersPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
-		comparePatchedVersion:        `{"tables":{"total":2,"done":1}}` + "\n",
-		deferIndexesPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		constraintPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
-		allDatabasesPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		splitResumePatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
-		tcpKeepalivePatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		snapshotPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
-		outputDBPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
-		applyGroupPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
-		statusIntervalPatchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
-		identifySystemPatchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
-		receiveDrainPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		followFixesPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
-		nullMatchPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
-		resumeErrorPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
-		rlsPatchedVersion:            `{"tables":{"total":2,"done":1}}` + "\n",
-		partitionPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
-		bootstrapPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
-		keepalivePatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
-		previousPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
-		oldestPatchedVersion:         `{"tables":{"total":2,"done":1}}` + "\n",
-		"0.18":                       "",
-		"0.18.159.g9d8b660-extra":    "",
-		"0.18.157.g5fa0950-extra":    "",
-		"0.18.144.g86bf908-extra":    "",
-		"0.18.136.gb42f560-extra":    "",
-		"0.18.132.gd4a2db1-extra":    "",
-		"0.18.129.gd7547b5-extra":    "",
-		"0.18.112.g4c61e97-extra":    "",
-		"0.18.109.gbec4ebb-extra":    "",
-		"0.18.104.g362a559-extra":    "",
-		"0.18.98.g944abcc-extra":     "",
-		"0.18.94.gbaa94ee-extra":     "",
-		"0.18.76.gf9b328b-extra":     "",
-		"0.18.74.gc682dce-extra":     "",
-		"0.18.72.g2aa91e7-extra":     "",
-		"0.18.70.gbb8dbfc-extra":     "",
-		"0.18.39.g93eda1d-extra":     "",
-		"0.18.36.g972e221-extra":     "",
-		"0.18.34.g7fddd6f-extra":     "",
-		"0.18.22.g22e29c3-extra":     "",
-		"0.18.15.gea2dc96-extra":     "",
-		"0.18.13.g4873c18-extra":     "",
-		"0.18.10.gaadc4bf-extra":     "",
-		"0.18.5.ge37d2bd-extra":      "",
+		patchedVersion:                `{"tables":{"total":2,"done":1}}` + "\n",
+		publicationSkipPatchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
+		walWorkersPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
+		comparePatchedVersion:         `{"tables":{"total":2,"done":1}}` + "\n",
+		deferIndexesPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		constraintPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
+		allDatabasesPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		splitResumePatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
+		tcpKeepalivePatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		snapshotPatchedVersion:        `{"tables":{"total":2,"done":1}}` + "\n",
+		outputDBPatchedVersion:        `{"tables":{"total":2,"done":1}}` + "\n",
+		applyGroupPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
+		statusIntervalPatchedVersion:  `{"tables":{"total":2,"done":1}}` + "\n",
+		identifySystemPatchedVersion:  `{"tables":{"total":2,"done":1}}` + "\n",
+		receiveDrainPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		followFixesPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
+		nullMatchPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
+		resumeErrorPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
+		rlsPatchedVersion:             `{"tables":{"total":2,"done":1}}` + "\n",
+		partitionPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
+		bootstrapPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
+		keepalivePatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
+		previousPatchedVersion:        `{"tables":{"total":2,"done":1}}` + "\n",
+		oldestPatchedVersion:          `{"tables":{"total":2,"done":1}}` + "\n",
+		"0.18":                        "",
+		"0.18.168.ge8eec0f-extra":     "",
+		"0.18.159.g9d8b660-extra":     "",
+		"0.18.157.g5fa0950-extra":     "",
+		"0.18.144.g86bf908-extra":     "",
+		"0.18.136.gb42f560-extra":     "",
+		"0.18.132.gd4a2db1-extra":     "",
+		"0.18.129.gd7547b5-extra":     "",
+		"0.18.112.g4c61e97-extra":     "",
+		"0.18.109.gbec4ebb-extra":     "",
+		"0.18.104.g362a559-extra":     "",
+		"0.18.98.g944abcc-extra":      "",
+		"0.18.94.gbaa94ee-extra":      "",
+		"0.18.76.gf9b328b-extra":      "",
+		"0.18.74.gc682dce-extra":      "",
+		"0.18.72.g2aa91e7-extra":      "",
+		"0.18.70.gbb8dbfc-extra":      "",
+		"0.18.39.g93eda1d-extra":      "",
+		"0.18.36.g972e221-extra":      "",
+		"0.18.34.g7fddd6f-extra":      "",
+		"0.18.22.g22e29c3-extra":      "",
+		"0.18.15.gea2dc96-extra":      "",
+		"0.18.13.g4873c18-extra":      "",
+		"0.18.10.gaadc4bf-extra":      "",
+		"0.18.5.ge37d2bd-extra":       "",
 	} {
 		cmd := exec.Command(sh, "-c", p.GateScript())
 		cmd.Env = append(os.Environ(), "PATH="+stubPgcopydb(t, version)+":"+os.Getenv("PATH"))
@@ -261,7 +265,7 @@ func TestGateScript_UnderSh(t *testing.T) {
 	}
 	// The disabled gate has to parse too: it is pasted into the verify Job's
 	// script, where a syntax error would be the whole file's problem.
-	for _, versions := range [][]string{nil, {patchedVersion}, {patchedVersion, walWorkersPatchedVersion, comparePatchedVersion, deferIndexesPatchedVersion, constraintPatchedVersion, allDatabasesPatchedVersion, splitResumePatchedVersion, tcpKeepalivePatchedVersion, snapshotPatchedVersion, outputDBPatchedVersion, applyGroupPatchedVersion, statusIntervalPatchedVersion, identifySystemPatchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion}} {
+	for _, versions := range [][]string{nil, {patchedVersion}, {patchedVersion, publicationSkipPatchedVersion, walWorkersPatchedVersion, comparePatchedVersion, deferIndexesPatchedVersion, constraintPatchedVersion, allDatabasesPatchedVersion, splitResumePatchedVersion, tcpKeepalivePatchedVersion, snapshotPatchedVersion, outputDBPatchedVersion, applyGroupPatchedVersion, statusIntervalPatchedVersion, identifySystemPatchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion}} {
 		script := NewFromExec(&fakeExec{}, versions).GateScript()
 		if err := exec.Command(sh, "-n", "-c", script).Run(); err != nil {
 			t.Errorf("allowlist %v renders a script sh rejects: %v\n%s", versions, err, script)

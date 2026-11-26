@@ -5,7 +5,7 @@ Read the keywords MUST, SHOULD, and MAY as RFC 2119 describes them.
 
 This page covers the base clone (`pgcopydb clone`), the whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 The ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/).
-For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/9d8b660f412238f4c5c04d29ad40425e12ec57d5).
+For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e).
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record the scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot check.
 
@@ -74,9 +74,11 @@ The check matches that description, not only the flag name, because another pgco
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twenty-three pgcopydb versions, with different guarantees.
+The progress poll supports twenty-four pgcopydb versions, with different guarantees.
 
-The bundled runner, `0.18.159.g9d8b660`, does not copy the publications that pgcopydb creates on the source to the target ([fork PR #45](https://github.com/ydixken/pgcopydb/pull/45)).
+The bundled runner, `0.18.168.ge8eec0f`, keeps the seven per-transaction SQLite statements of apply prepared, so apply uses less CPU ([fork PR #47](https://github.com/ydixken/pgcopydb/pull/47)).
+
+`0.18.159.g9d8b660` and later runners do not copy the publications that pgcopydb creates on the source to the target ([fork PR #45](https://github.com/ydixken/pgcopydb/pull/45)).
 These are the automatic publication or, with `spec.follow.walWorkers` above 1, the per-table publications `<slot>_t<table oid>`.
 Older runners copy them to the target in the post-data step of `pgcopydb clone --follow`, and cleanup does not drop them there.
 Other publications of the source, which include a publication that `spec.follow.publication` names, go to the target with all runners.
