@@ -1017,6 +1017,15 @@ else
 fi
 `
 
+// followModeRunnerBlock fails closed: a pgcopydb without the flag ignores
+// PGCOPYDB_FOLLOW_MODE and follows in sqlite mode.
+const followModeRunnerBlock = `if pgcopydb clone --help 2>&1 | grep -qF -- '` + pgcopydb.FollowModeFlag + `'; then
+  echo "ok: runner pgcopydb accepts ` + pgcopydb.FollowModeFlag + `"
+else
+  note "preflight: spec.follow.mode performance needs follow mode support, and the pgcopydb in runner image $` + runnerImageEnv + ` lacks it (pgcopydb clone --help does not list ` + pgcopydb.FollowModeFlag + `); remove the spec.runner.image pin, or recreate the Migration without spec.follow.mode"
+fi
+`
+
 // walWorkersHeadroomBlock counts pg_stat_replication rows, which a role without pg_read_all_stats
 // still sees, unlike pg_stat_activity.backend_type. An unreadable count fails the -ge test.
 const walWorkersHeadroomBlock = `wal_free=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('max_replication_slots')::int - count(*) from pg_replication_slots") || wal_free=''
@@ -1539,6 +1548,9 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	b.WriteString(rlsAuditBlock)
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
+		if performanceMode(m) {
+			b.WriteString(followModeRunnerBlock)
+		}
 		if m.Spec.Follow.WalWorkers > 1 {
 			b.WriteString(walWorkersBlock(m.Spec.Follow))
 		} else {
@@ -1618,7 +1630,7 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
 	}
-	if m.Spec.Clone.DeferIndexes || (m.Spec.Follow != nil && m.Spec.Follow.WalWorkers > 1) {
+	if m.Spec.Clone.DeferIndexes || (m.Spec.Follow != nil && m.Spec.Follow.WalWorkers > 1) || performanceMode(m) {
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: runnerImageEnv, Value: runnerImageFor(m, runnerImage)})
 	}

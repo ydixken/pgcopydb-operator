@@ -1619,6 +1619,86 @@ func TestBuildPreflightJob_WalWorkersEnv(t *testing.T) {
 	}
 }
 
+// TestPreflightScriptFor_FollowMode pins that unset and sqlite keep today's script,
+// and that performance adds the runner probe right after the wal_level check and nothing else.
+func TestPreflightScriptFor_FollowMode(t *testing.T) {
+	m := superMigration()
+	off := preflightScriptFor(m)
+	if strings.Contains(off, pgcopydb.FollowModeFlag) {
+		t.Fatalf("an unset mode needs no runner probe:\n%s", off)
+	}
+	m.Spec.Follow.Mode = v1beta1.FollowModeSQLite
+	if preflightScriptFor(m) != off {
+		t.Fatal("mode sqlite must leave the script as it is with the mode unset")
+	}
+	m.Spec.Follow.Mode = v1beta1.FollowModePerformance
+	on := preflightScriptFor(m)
+	if !strings.Contains(on, walLevelBlock+followModeRunnerBlock) {
+		t.Fatalf("the probe must follow the wal_level check:\n%s", on)
+	}
+	if strings.Replace(on, followModeRunnerBlock, "", 1) != off {
+		t.Fatal("the probe must be the only difference")
+	}
+}
+
+// TestPreflightScript_FollowMode runs the probe against the help a runner's
+// pgcopydb prints; only a help that lists --follow-mode passes.
+func TestPreflightScript_FollowMode(t *testing.T) {
+	run := followPreflightHarness(t)
+	m := superMigration()
+	m.Spec.Follow.Mode = v1beta1.FollowModePerformance
+	script := preflightScriptFor(m)
+	// The option block of PGCOPYDB_CLONE_GETOPTS_HELP in our fork's
+	// src/bin/pgcopydb/cli_clone_follow.c at 9d8b660, the last runner without the mode.
+	old, err := os.ReadFile(filepath.Join("testdata", "clone-help-9d8b660.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		accepted = "ok: runner pgcopydb accepts --follow-mode"
+		failure  = "preflight: spec.follow.mode performance needs follow mode support," +
+			" and the pgcopydb in runner image img:old lacks it (pgcopydb clone --help does not list --follow-mode);" +
+			" remove the spec.runner.image pin, or recreate the Migration without spec.follow.mode"
+		modeLine = "  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n"
+	)
+	t.Run("a help that lists the flag passes", func(t *testing.T) {
+		out, code, _ := run(t, script, "", "PGCOPYDB_STUB_HELP="+string(old)+modeLine, "PREFLIGHT_RUNNER_IMAGE=img:old")
+		if code != 0 || !strings.Contains(out, accepted) || !strings.Contains(out, preflightAllChecksPassed) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	for _, tc := range []struct{ name, help, exit string }{
+		// It lists --follow, so a probe for a shorter token passes it.
+		{"the 9d8b660 help fails", string(old), "0"},
+		{"a runner without pgcopydb fails", "", "127"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, _ := run(t, script, "",
+				"PGCOPYDB_STUB_HELP="+tc.help, "PGCOPYDB_STUB_EXIT="+tc.exit, "PREFLIGHT_RUNNER_IMAGE=img:old")
+			if code != 1 || !strings.Contains(out, "preflight failed:") || !strings.Contains(out, failure) ||
+				strings.Contains(out, accepted) || strings.Contains(out, preflightAllChecksPassed) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		})
+	}
+}
+
+// TestBuildPreflightJob_FollowModeEnv pins that a performance Migration carries the
+// image its probe names, and an unset or sqlite mode adds no env.
+func TestBuildPreflightJob_FollowModeEnv(t *testing.T) {
+	for mode, want := range map[string]string{"": "", v1beta1.FollowModeSQLite: "", v1beta1.FollowModePerformance: testRunnerImage} {
+		m := superMigration()
+		m.Spec.Follow.Mode = mode
+		job, err := buildPreflightJob(m, testRunnerImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := envValue(job.Spec.Template.Spec.Containers[0].Env, runnerImageEnv); got != want {
+			t.Fatalf("mode %q: %s = %q, want %q", mode, runnerImageEnv, got, want)
+		}
+	}
+}
+
 // TestPreflightScript_WalWorkersLive runs the headroom and table queries through a
 // real psql; CI supplies PGCOPYDB_TEST_PGURI. One server answers for both sides.
 func TestPreflightScript_WalWorkersLive(t *testing.T) {
