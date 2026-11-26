@@ -69,7 +69,7 @@ const WalWorkersFlag = "--wal-workers"
 
 // FollowModeFlag is the token our fork's clone --help prints; the preflight probe
 // requires it, because an older pgcopydb ignores PGCOPYDB_FOLLOW_MODE.
-const FollowModeFlag = "--follow-mode"
+const FollowModeFlag = "--follow"
 
 // CloneArgs renders the `pgcopydb clone` argv; each bool adds its flag. restart
 // wipes the work dir, so state a deleted Migration left on the volume cannot
