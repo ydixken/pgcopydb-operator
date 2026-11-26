@@ -174,6 +174,11 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	// Jobs, and a cleanup left Pending on a busy cluster leaks a source slot.
 	job.Spec.Template.Spec.Containers[0].Resources =
 		pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)
+	// Control O16: a sqlite Migration gets PGCOPYDB_FOLLOW_MODE=sqlite.
+	if followEnabled(m) {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_FOLLOW_MODE", Value: "sqlite"})
+	}
 	// pgcopydb reads the apply group size from the environment only.
 	if followEnabled(m) && m.Spec.Follow.ApplyGroupTransactions > 0 {
 		c := &job.Spec.Template.Spec.Containers[0]
