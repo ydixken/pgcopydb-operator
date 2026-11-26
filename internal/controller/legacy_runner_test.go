@@ -52,17 +52,17 @@ func legacyRunnerMigration(follow v1beta1.FollowOptions) *v1beta1.Migration {
 }
 
 // legacyRunnerGoldens renders the follow Jobs that a runner pinned to 9d8b660
-// must keep getting, keyed by golden file name. The files were recorded before
-// spec.follow.mode existed, so they pin a Migration without a mode to those bytes.
-func legacyRunnerGoldens(t *testing.T) map[string][]byte {
+// must keep getting under mode, keyed by golden file name. The files were
+// recorded before spec.follow.mode existed, so they pin sqlite to those bytes.
+func legacyRunnerGoldens(t *testing.T, mode string) map[string][]byte {
 	t.Helper()
 	workers := legacyRunnerMigration(v1beta1.FollowOptions{
-		Enabled: true, Plugin: pgoutputPlugin, WalWorkers: 3,
+		Enabled: true, Plugin: pgoutputPlugin, Mode: mode, WalWorkers: 3,
 		HighTrafficTables: []string{legacyHotTable, "public.events"},
 	})
 	out := map[string][]byte{}
 	for name, m := range map[string]*v1beta1.Migration{
-		"follow":     legacyRunnerMigration(v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}),
+		"follow":     legacyRunnerMigration(v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin, Mode: mode}),
 		"walworkers": workers,
 	} {
 		job, err := buildJob(m, "img", 1)
@@ -86,13 +86,16 @@ func legacyRunnerGoldens(t *testing.T) map[string][]byte {
 }
 
 // TestLegacyRunnerGolden pins the worker Job, the preflight script and the
-// verify script of a follow Migration without a mode, at one worker and at three.
+// verify script of a sqlite follow Migration, at one worker and at three, with
+// the mode unset and set to sqlite: sqlite needs nothing from a newer runner.
 func TestLegacyRunnerGolden(t *testing.T) {
-	goldens := legacyRunnerGoldens(t)
-	if len(goldens) != 5 {
-		t.Fatalf("want 5 golden files, rendered %d", len(goldens))
-	}
-	for name, got := range goldens {
-		t.Run(name, func(t *testing.T) { assertGolden(t, name, got) })
+	for label, mode := range map[string]string{"no mode": "", "sqlite": v1beta1.FollowModeSQLite} {
+		goldens := legacyRunnerGoldens(t, mode)
+		if len(goldens) != 5 {
+			t.Fatalf("%s: want 5 golden files, rendered %d", label, len(goldens))
+		}
+		for name, got := range goldens {
+			t.Run(label+"/"+name, func(t *testing.T) { assertGolden(t, name, got) })
+		}
 	}
 }
