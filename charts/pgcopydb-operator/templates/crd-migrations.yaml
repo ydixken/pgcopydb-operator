@@ -518,8 +518,8 @@ spec:
                     no publication, and no unloggedTables or highTrafficTables
                   rule: '!has(self.mode) || self.mode != ''performance'' || (has(self.enabled)
                     && self.enabled && (!has(self.plugin) || self.plugin == ''pgoutput'')
-                    && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables)
-                    == 0) && (!has(self.highTrafficTables) || size(self.highTrafficTables)
+                    && (!has(self.unloggedTables) || size(self.unloggedTables) ==
+                    0) && (!has(self.highTrafficTables) || size(self.highTrafficTables)
                     == 0))'
                 - message: mode performance requires walWorkers unset or 1; use mode
                     sqlite for more than one WAL worker
@@ -3229,8 +3229,8 @@ spec:
                     no publication, and no unloggedTables or highTrafficTables
                   rule: '!has(self.mode) || self.mode != ''performance'' || (has(self.enabled)
                     && self.enabled && (!has(self.plugin) || self.plugin == ''pgoutput'')
-                    && !has(self.publication) && (!has(self.unloggedTables) || size(self.unloggedTables)
-                    == 0) && (!has(self.highTrafficTables) || size(self.highTrafficTables)
+                    && (!has(self.unloggedTables) || size(self.unloggedTables) ==
+                    0) && (!has(self.highTrafficTables) || size(self.highTrafficTables)
                     == 0))'
                 - message: mode performance requires walWorkers unset or 1; use mode
                     sqlite for more than one WAL worker
