@@ -87,6 +87,7 @@ Other publications of the source, which include a publication that `spec.follow.
 With `0.18.144.g86bf908` and older runners, preflight refuses `spec.follow.walWorkers` above 1, because their `pgcopydb clone --help` does not list `--wal-workers`.
 `0.18.157.g5fa0950` also keeps the SQLite statements of receive and apply prepared, so receive uses less CPU ([fork PR #43](https://github.com/ydixken/pgcopydb/pull/43)).
 
+A Migration with `sqlite` or no [follow mode](#follow-mode) gets no new setting, so a `spec.runner.image` pin to the runner of v0.27.0 or v0.28.0 (`0.18.159.g9d8b660`) continues to operate.
 With a runner whose `pgcopydb clone --help` does not list `--follow-mode`, preflight refuses `spec.follow.mode: performance` ([Follow mode](#follow-mode)).
 
 `0.18.144.g86bf908` added the compare progress lines.

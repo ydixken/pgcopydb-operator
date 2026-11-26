@@ -28,6 +28,7 @@ It does not tell you anything about your own data.
 - Network access from pods in those namespaces to both servers.
 - Image pulls from `ghcr.io` in the cluster.
   The operator and runner images are under `ghcr.io/ydixken/pgcopydb-operator`.
+  The follow mode specs also use the runner image `v0.28.0`, whatever `E2E_RUNNER_TAG` is.
   The client pod and the seed Job use `ghcr.io/cloudnative-pg/postgresql:18`.
   The collector uses `ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.162.0`.
 - One database on each server, with no user objects in it on the first run.
