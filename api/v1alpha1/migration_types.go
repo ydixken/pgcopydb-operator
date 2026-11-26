@@ -434,7 +434,7 @@ type FollowOptions struct {
 	// performance spools pgoutput as received and applies it on one slot.
 	// +kubebuilder:validation:Enum=sqlite;performance
 	// +optional
-	Mode string `json:"mode,omitempty"`
+	Mode string `json:"mode"`
 
 	// walWorkers is the number of parallel CDC streams pgcopydb runs, each with
 	// its own replication slot and target replication origin. Unset or 1 keeps
