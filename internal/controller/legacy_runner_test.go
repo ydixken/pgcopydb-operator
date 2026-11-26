@@ -18,6 +18,7 @@ package controller
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,6 +90,9 @@ func legacyRunnerGoldens(t *testing.T, mode string) map[string][]byte {
 // verify script of a sqlite follow Migration, at one worker and at three, with
 // the mode unset and set to sqlite: sqlite needs nothing from a newer runner.
 func TestLegacyRunnerGolden(t *testing.T) {
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		t.Fatal("UPDATE_GOLDEN would re-record the legacy runner golden files; these files are recorded from main only")
+	}
 	for label, mode := range map[string]string{"no mode": "", "sqlite": v1beta1.FollowModeSQLite} {
 		goldens := legacyRunnerGoldens(t, mode)
 		if len(goldens) != 5 {
