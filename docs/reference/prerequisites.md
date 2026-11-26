@@ -604,14 +604,14 @@ See [All databases configuration](../configuration.md#all-databases) and [the ex
 Before the first attempt, and after the connectivity probes, the preflight Job also checks the requirements of this section:
 
 - `wal_level`.
-- Free-slot headroom, or the [WAL worker](#wal-workers) headroom.
 - With `mode: performance`, [follow mode](#follow-mode) support in the runner.
+- Free-slot headroom, or the [WAL worker](#wal-workers) headroom.
 - `wal_sender_timeout`, which only warns.
 - The source role's REPLICATION attribute.
 - EXECUTE on the origin functions.
 - The `session_replication_role` SET privilege.
-- An audit of every user table for a usable replica identity.
 - An audit of the tables in scope for unlogged tables.
+- An audit of every user table for a usable replica identity.
 
 A failed check fails the Migration before any data moves.
 The `Validated` condition message then gives the exact missing GRANT, setting, or table list.
