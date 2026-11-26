@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -182,9 +183,9 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 		})
 	}
 	// An unset or sqlite mode sets nothing, so a sqlite Migration runs alike on an older runner.
-	if performanceMode(m) {
+	if followEnabled(m) {
 		c := &job.Spec.Template.Spec.Containers[0]
-		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_FOLLOW_MODE", Value: v1beta1.FollowModePerformance})
+		c.Env = append(c.Env, corev1.EnvVar{Name: "PGCOPYDB_FOLLOW_MODE", Value: cmp.Or(m.Spec.Follow.Mode, v1beta1.FollowModeSQLite)})
 	}
 	// validateWalWorkers above guarantees follow is enabled when walWorkers is above 1,
 	// and that highTrafficTables is set only then.
