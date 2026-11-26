@@ -71,9 +71,10 @@ func legacyRunnerSQLiteCutover() {
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-1"}, job)).To(Succeed())
 	c := job.Spec.Template.Spec.Containers[0]
 	Expect(c.Image).To(Equal(legacyRunnerImage))
-	for _, e := range c.Env {
-		Expect(e.Name).NotTo(Equal("PGCOPYDB_FOLLOW_MODE"), "a sqlite worker Job must not set the follow mode")
-	}
+	// Every runner Job sets PGCOPYDB_LOG_JSON, so the absence check below reads a real worker env.
+	Expect(c.Env).To(ContainElement(HaveField("Name", "PGCOPYDB_LOG_JSON")))
+	Expect(c.Env).NotTo(ContainElement(HaveField("Name", "PGCOPYDB_FOLLOW_MODE")),
+		"a sqlite worker Job must not set the follow mode")
 
 	By("stopping the writer and arming Automatic cutover")
 	last, err := w.stop()
