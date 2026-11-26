@@ -12,7 +12,7 @@
 # it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
 # that because binfmt runs the amd64 binary natively on the build host.
 # renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
-FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:9d8b660f412238f4c5c04d29ad40425e12ec57d5@sha256:794a02a352f978353ca4288e6ec6c4625f4cd98e2195ce196e554a41d108c033 AS pgcopydb
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:e8eec0fe5b878970dd8eb19168b4acaaf7eff12e@sha256:8ea77047deb99725c975a8b43ff68e514c27fbd240d28ad8717fd90874c88c5e AS pgcopydb
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
@@ -80,7 +80,7 @@ ENV PATH=/opt/pgtools:$PATH
 # Run the worker, credential escaping, and sampler timeout after purging so
 # a missing runtime capability fails the image build.
 RUN set -eux; \
-    pgcopydb --version | grep -qF '0.18.159.g9d8b660'; \
+    pgcopydb --version | grep -qF '0.18.168.ge8eec0f'; \
     pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF 'Build indexes once all table data is copied'; \
     pgcopydb clone --help 2>&1 | grep -qF -- '--wal-workers'; \
     # No flag or help text shows the compare data progress lines, so look for their text.

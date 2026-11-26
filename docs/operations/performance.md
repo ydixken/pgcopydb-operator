@@ -10,7 +10,7 @@ Do not assume that the target is the bottleneck.
 ## Follow receive and apply
 
 The bundled pgcopydb carries the fork PRs that the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md) lists.
-Fork PRs #27 to #30 and #43 raise its follow throughput:
+Fork PRs #27 to #30, #43, and #47 raise its follow throughput:
 
 1. Apply waits on the receive pipe only after a pass that found nothing to do.
    Apply also returns from the pipeline sync as soon as the sync result is in ([#27](https://github.com/ydixken/pgcopydb/pull/27)).
@@ -24,6 +24,9 @@ Fork PRs #27 to #30 and #43 raise its follow throughput:
 1. Apply commits several source transactions in one target transaction, an apply group ([#30](https://github.com/ydixken/pgcopydb/pull/30)).
 1. Receive prepares its SQLite insert statements one time, and apply prepares its two read statements one time ([#43](https://github.com/ydixken/pgcopydb/pull/43)).
    In a receive drain test, receive went from 39.2k to 100.4k rows/s (2.55x), and the spooled rows were byte-identical.
+1. Apply prepares its seven per-transaction SQLite statements one time for each database handle ([#47](https://github.com/ydixken/pgcopydb/pull/47)).
+   We measured it on the fork benchmark harness (`tests/bench-cdc`, [#46](https://github.com/ydixken/pgcopydb/pull/46)).
+   Apply on workload A went from 279.7 s to 136.3 s (2.05x, median of five runs), and apply on workload B was 1.25x faster.
 
 Apply still sends each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement.
 Because of this, a burst of these DELETEs on such a table applies more slowly than on a keyed table.
