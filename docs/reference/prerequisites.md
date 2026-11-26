@@ -87,6 +87,8 @@ Other publications of the source, which include a publication that `spec.follow.
 With `0.18.144.g86bf908` and older runners, preflight refuses `spec.follow.walWorkers` above 1, because their `pgcopydb clone --help` does not list `--wal-workers`.
 `0.18.157.g5fa0950` also keeps the SQLite statements of receive and apply prepared, so receive uses less CPU ([fork PR #43](https://github.com/ydixken/pgcopydb/pull/43)).
 
+With a runner whose `pgcopydb clone --help` does not list `--follow-mode`, preflight refuses `spec.follow.mode: performance` ([Follow mode](#follow-mode)).
+
 `0.18.144.g86bf908` added the compare progress lines.
 `pgcopydb compare data` logs a `compare progress:` line of JSON counters when its workers start, then every 10 seconds.
 It logs one last line with `"final":true`.
@@ -602,6 +604,7 @@ Before the first attempt, and after the connectivity probes, the preflight Job a
 
 - `wal_level`.
 - Free-slot headroom, or the [WAL worker](#wal-workers) headroom.
+- With `mode: performance`, [follow mode](#follow-mode) support in the runner.
 - `wal_sender_timeout`, which only warns.
 - The source role's REPLICATION attribute.
 - EXECUTE on the origin functions.
@@ -771,6 +774,18 @@ Schema and workload contract:
   `compare data` covers tables, not `pg_largeobject`, so `Verified` stays `True`.
   The [`limitations/large_object_change`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Sequences need no action: pgcopydb re-syncs them automatically after cutover.
+
+### Follow mode
+
+With [`spec.follow.mode: performance`](../configuration.md#follow-mode), preflight makes sure that `pgcopydb clone --help` of the runner image lists `--follow-mode`.
+An older pgcopydb ignores `PGCOPYDB_FOLLOW_MODE` and follows in sqlite mode with no error.
+Thus, when the flag is not in the help, preflight fails the Migration with reason `PreflightFailed`, and the condition message names the runner image.
+To fix the failure, do one of these steps, then create a new Migration:
+
+- Delete the `spec.runner.image` pin, so that the Migration uses the bundled runner.
+- Delete `spec.follow.mode`, so that the Migration uses sqlite mode.
+
+With `sqlite` or no mode, preflight does not do this check.
 
 ### WAL workers
 

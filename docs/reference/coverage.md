@@ -45,7 +45,7 @@ This page maps every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.1
 | `--wal2json-numeric-as-string` | `spec.follow.wal2jsonNumericAsString` | CEL rejects it unless `follow.plugin` is `wal2json`. Other plugins would silently ignore it. |
 | `--replay-no-op-updates` | `spec.follow.replayNoOpUpdates` | |
 | `PGCOPYDB_APPLY_GROUP_TXNS` | `spec.follow.applyGroupTransactions` | An environment variable, not a flag. The worker Job sets it only when you set the field. |
-| `PGCOPYDB_FOLLOW_MODE` | `spec.follow.mode` | An environment variable, not a flag. The worker Job sets it only for `performance`. Fork-only. |
+| `PGCOPYDB_FOLLOW_MODE` | `spec.follow.mode` | An environment variable, not a flag. The worker Job sets it only for `performance`. Fork-only. Preflight checks the runner. |
 | `PGCOPYDB_WAL_WORKERS` | `spec.follow.walWorkers` | An environment variable, not a flag. The worker Job sets it only above 1. Fork-only. Preflight checks the runner. |
 | `PGCOPYDB_WAL_HIGH_TRAFFIC_TABLES` | `spec.follow.highTrafficTables` | An environment variable, not a flag. The worker Job sets it, comma-separated, only when the list has entries. Fork-only. |
 | `--slot-name` | `spec.follow.slotName` | Empty generates a unique per-Migration name. A set name is pattern-restricted to PostgreSQL's slot charset. |

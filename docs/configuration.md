@@ -253,7 +253,7 @@ For `sqlite` or no mode, the operator does not set the variable, and the worker 
 
 > [!warning]
 > `mode: performance` needs a runner image with a pgcopydb that shows `--follow-mode` in `pgcopydb clone --help`.
-> An older pgcopydb ignores the variable and uses `sqlite`.
+> An older pgcopydb ignores the variable and uses `sqlite`, so preflight fails the Migration on such a runner ([Prerequisites](reference/prerequisites.md#follow-mode)).
 
 The same source changes can give a different target in the two modes.
 These are the cases:
