@@ -127,12 +127,38 @@ row value contains ERROR: but is not a subprocess failure
 	}
 }
 
+// Lines of a follow in performance mode, worded as the pinned runner writes
+// them (pgcopydb 0.18.159.g9d8b660: ld_stream.c:1387, sentinel.c:856,
+// ld_apply.c:1268, follow.c:414, cli_clone_follow.c:1150). The raw spool keeps
+// each of them, so every matcher must hold on a tail that carries no SQLite
+// line, and the spool's own done lines must not read as a marker.
+const (
+	rawReceiveDone   = `{"error_severity":"INFO","message":"streamCloseFile: receive done at 0/4A1B2C8, signalling transform"}` + "\n"
+	rawReceiveEnd    = `{"error_severity":"INFO","message":"pipeline_state_end: receive done at 0/4A1B2C8"}` + "\n"
+	rawApplied       = `{"error_severity":"INFO","message":"Applied 3127 transactions in 3127 target transactions"}` + "\n"
+	rawApplyEnd      = `{"error_severity":"INFO","message":"pipeline_state_end: apply done at 0/4A1B2C8"}` + "\n"
+	rawSpoolTail     = rawReceiveDone + rawReceiveEnd + rawApplied + rawApplyEnd
+	rawFollowDone    = `{"error_severity":"INFO","message":"Follow mode is now done, reached endpos 0/4A1B2C8 with replay_lsn 0/4A1B2C8"}` + "\n"
+	rawSentinelApply = `{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+)
+
+// stamp prefixes every line with the runtime timestamp, the form the operator
+// reads a worker log in.
+func stamp(at time.Time, lines string) string {
+	var out strings.Builder
+	for line := range strings.Lines(lines) {
+		out.WriteString(at.Format(time.RFC3339Nano) + " " + line)
+	}
+	return out.String()
+}
+
 func TestCloneDone(t *testing.T) {
 	// Line shapes as the operator fetches them: the runtime's RFC3339Nano
 	// stamp, a space, then pgcopydb's JSON log line. The markers are the two
 	// lines pgcopydb 0.18 logs when the clone phase of clone --follow ends
 	// (cli_clone_follow.c, copydb_clone_database).
 	const ts = "2026-08-09T10:00:00.000000000Z "
+	cloneDoneAt := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name string
 		raw  string
@@ -159,6 +185,19 @@ func TestCloneDone(t *testing.T) {
 			name: "marker split across lines does not match",
 			raw: ts + `{"error_severity":"INFO","message":"Updating the pgcopydb.sen` + "\n" +
 				`tinel to enable applying changes"}`,
+			want: false,
+		},
+		{
+			// Performance mode moves the change spool out of SQLite and
+			// leaves this marker where it is: it is logged by the clone
+			// process, not by the stream.
+			name: "a performance-mode tail carries the same marker",
+			raw:  stamp(cloneDoneAt, rawSpoolTail+rawSentinelApply),
+			want: true,
+		},
+		{
+			name: "the raw spool's own done lines are not the clone marker",
+			raw:  stamp(cloneDoneAt, rawSpoolTail+rawFollowDone),
 			want: false,
 		},
 		{name: "empty tail", raw: "", want: false},
@@ -191,15 +230,50 @@ func TestScanWorkerLogs_FindsMarkerPastFormerTailLimit(t *testing.T) {
 
 func TestScanWorkerLogs_PersistsFollowDoneTime(t *testing.T) {
 	markerAt := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
-	raw := markerAt.Format(time.RFC3339Nano) +
-		` {"error_severity":"INFO","message":"Follow mode is now done, reached endpos 1/76081A70"}` + "\n"
-
-	scan, err := ScanWorkerLogs(strings.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
+	// The raw spool's own done lines are a second older, so a match on one of
+	// them would date the cutover wrongly and the row would fail.
+	tail := stamp(markerAt.Add(-time.Second), rawSpoolTail)
+	cases := []struct {
+		name   string
+		marker string
+		want   bool
+	}{
+		{
+			name:   "the abridged marker of a single stream",
+			marker: `{"error_severity":"INFO","message":"Follow mode is now done, reached endpos 1/76081A70"}` + "\n",
+			want:   true,
+		},
+		{
+			// The whole line of the pinned runner, which performance mode
+			// keeps word for word.
+			name:   "the full marker of one worker",
+			marker: rawFollowDone,
+			want:   true,
+		},
+		{
+			name:   "one word of the marker changed does not match",
+			marker: strings.Replace(rawFollowDone, "is now done", "is now complete", 1),
+			want:   false,
+		},
+		{
+			name:   "the raw spool tail alone holds no marker",
+			marker: "",
+			want:   false,
+		},
 	}
-	if scan.FollowDoneAt == nil || !scan.FollowDoneAt.Equal(markerAt) {
-		t.Fatalf("follow done time = %v, want %v", scan.FollowDoneAt, markerAt)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scan, err := ScanWorkerLogs(strings.NewReader(tail + stamp(markerAt, tc.marker)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tc.want && (scan.FollowDoneAt == nil || !scan.FollowDoneAt.Equal(markerAt)):
+				t.Fatalf("follow done time = %v, want %v", scan.FollowDoneAt, markerAt)
+			case !tc.want && scan.FollowDoneAt != nil:
+				t.Fatalf("follow done time = %v, want none", scan.FollowDoneAt)
+			}
+		})
 	}
 }
 
@@ -594,6 +668,24 @@ func TestSchemaDriftLine(t *testing.T) {
 {"timestamp":"2026-10-05 19:58:46.371","pid":4,"error_level":7,"error_severity":"ERROR","file_name":"follow.c","file_line_num":1057,"message":"Process apply has exited with error code 12, terminating other processes"}
 {"timestamp":"2026-10-05 19:58:46.540","pid":1,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"follow process 4 has terminated [12]"}`,
 			want: `[TARGET 60] [42703] ERROR:  column "extra" of relation "t" does not exist`,
+		},
+		{
+			// The direct apply of performance mode: the same pair, with no
+			// replayDB line before it, and the apply's error end marker after.
+			name: "the direct apply replays a change naming a column the target lacks",
+			raw: severe(drift) +
+				severe(`[TARGET 60] LINE 1: ...T INTO \"t\" (\"id\", \"name\", \"extra\") o...`) +
+				pipeline("[TARGET 60]") +
+				`{"error_severity":"INFO","message":"pipeline_state_end: apply error at 0\/4A1B2C8"}` + "\n" +
+				severe("Process apply has exited with error code 12, terminating other processes"),
+			want: `[TARGET 60] [42703] ERROR:  column "extra" of relation "t" does not exist`,
+		},
+		{
+			name: "one word of the pipeline context changed does not match",
+			raw: severe(drift) +
+				severe("[TARGET 60] Context: Failed to receive pipeline synchronisation") +
+				severe("Process apply has exited with error code 12, terminating other processes"),
+			want: "",
 		},
 		// Only apply sends through a pipeline; every other 42703 keeps its retries.
 		{
