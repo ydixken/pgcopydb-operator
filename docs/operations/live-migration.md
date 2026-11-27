@@ -148,6 +148,8 @@ When published tables are idle, genuine primary keepalives from the current conn
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
+These statements hold in both [follow modes](../configuration.md#follow-mode).
+In `performance` mode, `replayLSN` reports the position up to which apply durably committed the spooled changes.
 Other supported runner versions differ.
 See [client tool versions](../reference/prerequisites.md#client-tool-versions).
 After cutover, when each target replication origin (one for each WAL worker) is exactly on the frozen endpos, the drain verification proves this.
@@ -155,6 +157,7 @@ Where an origin is not on endpos, the drain verification compares content.
 In the first case, the proof depends only on the origin bookkeeping of the runner.
 
 > [!warning]
+> No runner in this list has a follow mode, so every item of this warning is about [`sqlite` mode](../configuration.md#follow-mode).
 > Runners older than `0.18.70.gbb8dbfc` can lose committed source changes during follow without an error.
 > They skip a transaction that began before another one committed ([#356](https://github.com/ydixken/pgcopydb-operator/issues/356)).
 > They keep one row for each heap page of a source `COPY` ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)).

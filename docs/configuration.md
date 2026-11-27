@@ -228,6 +228,14 @@ The two values have these effects:
   When `walWorkers` is more than 1, each WAL worker uses its own replication slot.
 - `performance` writes the pgoutput stream to a spool on the work volume as it arrives.
   It uses one replication slot and applies the changes from the spool.
+  It keeps no SQLite store of the changes.
+
+In `performance` mode, the migration runs one WAL worker.
+A later release can permit more than one worker in this mode.
+
+This release gives no throughput recommendation for either mode.
+`performance` mode is available on request only, and `sqlite` mode stays the default with the behaviour of the earlier releases.
+Measure your own workload in both modes before you select one.
 
 When `mode` is not set, the migration uses `sqlite`.
 A Migration that you created before the operator had this field uses `sqlite`.
@@ -250,6 +258,14 @@ To change the mode, create a new Migration.
 
 The operator sets `PGCOPYDB_FOLLOW_MODE=performance` in the worker Job only for `mode: performance`.
 For `sqlite` or no mode, the operator does not set the variable, and the worker Job does not change.
+
+The two modes keep different files on the work volume:
+
+- `sqlite` writes the received changes to `*-output.db` files and the statements of the transform to `*-replay.db` files.
+- `performance` writes the pgoutput stream to segment files (`*.seg`) in the `cdc` directory.
+  Each segment has an index file (`*.idx`), and the spool has one `relation.log`.
+  pgcopydb writes no `*-output.db` and no `*-replay.db` file in this mode.
+  pgcopydb deletes a segment after apply moved past the changes of that segment.
 
 > [!warning]
 > `mode: performance` needs a runner image with a pgcopydb that shows `--follow-mode` in `pgcopydb clone --help`.
@@ -363,6 +379,9 @@ spec:
 
 For live migrations, the volume also buffers the change stream.
 Budget the needs of the clone, plus the write rate times the expected migration window.
+In [`performance` mode](#follow-mode), that buffer is the raw spool, which holds the pgoutput stream of the source changes.
+We have no measured spool size for each GB of source WAL.
+Rehearse a live migration of your own workload, and read the size from the volume.
 
 ### Which node the Jobs prefer
 

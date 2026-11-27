@@ -35,6 +35,10 @@ For replay and flush feedback, it certifies genuine primary keepalive positions 
 - No receive transaction is open.
 - The endpos is unset.
 
+The first condition reads the SQLite apply cursor in [`sqlite` mode](../configuration.md#follow-mode).
+In `performance` mode, it reads the position up to which apply durably committed the spooled changes.
+The other two conditions are the same in both modes.
+
 Synthetic keepalives and WAL data headers cannot establish that boundary.
 So confirmed flush is not an independent transformation boundary, and `replay_lsn` is not strictly the position of the last applied data transaction.
 The [apply path confirms target COMMIT results](https://github.com/ydixken/pgcopydb/blob/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e/src/bin/pgcopydb/ld_apply.c#L1370-L1385) with [`synchronous_commit=on`](https://github.com/ydixken/pgcopydb/blob/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e/src/bin/pgcopydb/ld_apply.c#L38-L44) before it advances its data cursor.
@@ -101,7 +105,11 @@ The case keeps `approved: false`.
 
 ## Why SQLite file sizes are not the replacement
 
-The pinned pipeline writes received changes to output SQLite databases and transformed statements to replay SQLite databases.
+This section is about [`sqlite` mode](../configuration.md#follow-mode), which is the default.
+In `performance` mode, the spool segment files are not a replacement either.
+Their lengths measure the received bytes that cleanup has not deleted yet, not the work that apply has left.
+
+In `sqlite` mode, the pinned pipeline writes received changes to output SQLite databases and transformed statements to replay SQLite databases.
 The [apply loop invokes transformation inline](https://github.com/ydixken/pgcopydb/blob/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e/src/bin/pgcopydb/ld_apply.c#L703-L742), and both stages share one process and an in-memory progress record.
 That record is [checkpointed after every 64 inline-transform passes that make progress](https://github.com/ydixken/pgcopydb/blob/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e/src/bin/pgcopydb/ld_apply.c#L812-L820), not at a fixed wall-clock interval.
 Per-process CPU and I/O counts therefore do not separate the two stages, and the persisted record need not describe a long-running operation.

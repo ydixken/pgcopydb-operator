@@ -157,6 +157,7 @@ A retry that finds the slot of an earlier attempt and still has tables to copy s
 `0.18.98.g944abcc` copies the tables of either retry under a newer snapshot, and apply can then stop on a duplicate key ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378)).
 
 `0.18.98.g944abcc` added the closed `output.db` fix.
+This fix is about [`sqlite` mode](../configuration.md#follow-mode), which keeps the `output.db` files.
 During streaming, apply stays on an `output.db` that receive closed, until apply applies every committed transaction in that file.
 `0.18.94.gbaa94ee` can move to the next file and skip those transactions ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 
@@ -787,6 +788,9 @@ To fix the failure, do one of these steps, then create a new Migration:
 - Delete `spec.follow.mode`, so that the Migration uses sqlite mode.
 
 With `sqlite` or no mode, preflight does not do this check.
+
+In `performance` mode, pgcopydb keeps no `output.db` and no `replay.db` file.
+The items of this page that name those files are therefore about `sqlite` mode.
 
 ### WAL workers
 
