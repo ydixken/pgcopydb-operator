@@ -632,7 +632,7 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 	for _, want := range []string{
 		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
-		`present="case when t.copying then false else $populated end"`, // a table in flight owes the copy unprobed
+		`present="case when t.copying then false when t.held then true else $populated end"`, // a table in flight owes the copy unprobed, a locked one is not probed
 		"(select count(*) from t where $present)",
 		"|| ',' || ($present)::text || ')'",                                                                  // the target's row carries the flag per table
 		"join ($landed) as landed(name, populated)",                                                          // and the source joins it

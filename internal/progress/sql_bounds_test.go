@@ -454,8 +454,8 @@ func openCopy(t *testing.T, uri, app, setup, table string) {
 }
 
 // holdOpen sends script to a psql session that stays connected, and so keeps
-// its transaction open, until the test ends. It returns the session's input.
-func holdOpen(t *testing.T, uri, app, script string) io.Writer {
+// its transaction open, until the test ends.
+func holdOpen(t *testing.T, uri, app, script string) {
 	t.Helper()
 	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
 	stdin, err := cmd.StdinPipe()
@@ -470,7 +470,6 @@ func holdOpen(t *testing.T, uri, app, script string) io.Writer {
 	if _, err = io.WriteString(stdin, script); err != nil {
 		t.Fatal(err)
 	}
-	return stdin
 }
 
 // pgcopydbWorker names a session the way pgcopydb names its copy workers.
