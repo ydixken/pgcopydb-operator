@@ -1127,6 +1127,53 @@ var _ = Describe("Migration Controller follow mode", func() {
 			[]string{"attempt 2 failed: "}),
 	)
 
+	// A follow that a signal stops short of endpos exits non-zero, so the
+	// worker Job fails while the Migration is cutting over. Its last lines are
+	// the spool's own (pgcopydb 0.18.159.g9d8b660 ld_stream.c:1387 and
+	// sentinel.c:856), and none of them names a cause a retry cannot fix.
+	const (
+		spoolCutShort = `{"error_severity":"INFO","message":"streamCloseFile: receive done at 0/4A1B2C8, signalling transform"}` + "\n" +
+			`{"error_severity":"INFO","message":"pipeline_state_end: receive done at 0/4A1B2C8"}` + "\n"
+		volumeFull = `{"error_severity":"ERROR","message":"[SQLite 13: database or disk is full]: database or disk is full"}` + "\n"
+	)
+	DescribeTable("decides a worker that failed while cutting over from its log",
+		func(name, log string, wantTerminal bool) {
+			defer removeMigration(ctx, name)
+			fake := &fakeSentinel{}
+			r := followReconciler(fake)
+			r.Logs = cloneDoneLogs()
+			Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverAutomatic))).To(Succeed())
+			passPreflight(r, name)
+			reconcileAndGet(ctx, r, name) // run-1
+			fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
+			reconcileAndGet(ctx, r, name)
+			m := confirmCaughtUp(ctx, r, name)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+
+			m = failAttempt(r, name, 1, log)
+			if wantTerminal {
+				Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+				Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed).Reason).To(Equal("DiskFull"))
+				Expect(errors.IsNotFound(k8sClient.Get(ctx,
+					types.NamespacedName{Name: name + "-run-2", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+				return
+			}
+			Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed))
+			Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeNil())
+
+			// The cutover picks up where it stopped: the next attempt resumes
+			// the same work directory and drains to the endpos already set.
+			m = passRetryGate(ctx, r, name) // run-2
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+			Expect(m.Status.Attempts).To(Equal(int32(2)))
+			Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
+			Expect(fetchJob(ctx, name+"-run-2").Spec.Template.Spec.Containers[0].Args).To(
+				ContainElements("--resume", "--not-consistent"))
+		},
+		Entry("a log that names no cause resumes", "mig-follow-cutover-signal", spoolCutShort, false),
+		Entry("a full work volume is terminal", "mig-follow-cutover-full", volumeFull, true),
+	)
+
 	It("routes deletion through slot cleanup", func() {
 		const name = "mig-follow-delete"
 		defer removeMigration(ctx, name)
