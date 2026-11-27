@@ -783,6 +783,67 @@ func TestSnapshotLostLine(t *testing.T) {
 	}
 }
 
+// Refusal and prefix of F18's cdc-layout-refusal, written by
+// copydb_check_cdc_layout (fork:snapshot.c:825) and JSON-wrapped as the runner
+// logs it. The mirror line exchanges the two modes and shares the prefix.
+func TestLayoutRefusedLine(t *testing.T) {
+	const refusal = `Refusing the work directory: it was started with --follow-mode performance, and this run uses --follow-mode sqlite; resume with --follow-mode performance, or run pgcopydb stream cleanup and start over with --restart`
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// Only the prefix is the fork's contract; the rest of the wording may change.
+			name: "a run in the other mode's work directory is refused",
+			raw:  `{"timestamp":"2026-11-27 09:12:44.108","pid":1,"error_level":8,"error_severity":"FATAL","file_name":"snapshot.c","file_line_num":825,"message":"` + refusal + `"}`,
+			want: refusal,
+		},
+		{
+			// The fork may log the refusal at either severity, and both end the run.
+			name: "the refusal classifies at ERROR too",
+			raw:  `{"error_severity":"ERROR","message":"` + refusal + `"}`,
+			want: refusal,
+		},
+		{
+			name: "a mild line quoting the refusal does not classify",
+			raw:  `{"error_severity":"INFO","message":"` + refusal + `"}`,
+			want: "",
+		},
+		{
+			name: "the prefix inside another message does not classify",
+			raw:  `{"error_severity":"ERROR","message":"Failed to clone: ` + refusal + `"}`,
+			want: "",
+		},
+		{
+			name: "a refused resume is another cause and does not classify",
+			raw:  `{"error_severity":"FATAL","message":"Refusing to resume the copy: 2 of 3 tables still need their data"}`,
+			want: "",
+		},
+		{
+			name: "a refusal outside the terminal window does not classify",
+			raw: `{"error_severity":"FATAL","message":"` + refusal + `"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow),
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LayoutRefusedLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("LayoutRefusedLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if !strings.HasPrefix(refusal, LayoutRefusedPrefix) {
+		t.Fatalf("the refusal of F18 does not start with LayoutRefusedPrefix %q", LayoutRefusedPrefix)
+	}
+	// Both refusals start with "Refusing", and the chain in handleFailedJob gives
+	// the first match the verdict, so neither classifier may take the other's line.
+	if got := SnapshotLostLine([]byte(`{"error_severity":"FATAL","message":"` + refusal + `"}`)); got != "" {
+		t.Errorf("SnapshotLostLine() = %q, want the layout refusal left to LayoutRefusedLine", got)
+	}
+}
+
 // The origin error stays retryable: the retry gate holds on the orphaned apply backend that
 // keeps the origin busy, and a classifier hit here would fail the Migration instead.
 func TestOriginBusyIsNotTerminal(t *testing.T) {
@@ -796,6 +857,7 @@ func TestOriginBusyIsNotTerminal(t *testing.T) {
 		"DiskFullLine":         DiskFullLine,
 		"SchemaDriftLine":      SchemaDriftLine,
 		"SnapshotLostLine":     SnapshotLostLine,
+		"LayoutRefusedLine":    LayoutRefusedLine,
 	} {
 		if got := classify(raw); got != "" {
 			t.Errorf("%s() = %q, want the origin error left retryable", name, got)

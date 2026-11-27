@@ -788,6 +788,10 @@ To fix the failure, do one of these steps, then create a new Migration:
 
 With `sqlite` or no mode, preflight does not do this check.
 
+The work volume records the mode of the run that started it, and pgcopydb refuses a run that brings the other mode.
+The operator reports that refusal as the terminal reason `WorkDirLayoutRefused` ([Phase `Failed` with reason `WorkDirLayoutRefused`](../troubleshooting.md#phase-failed-with-reason-workdirlayoutrefused)).
+A volume with no recorded mode counts as `sqlite`, so a Migration in sqlite mode does not meet this refusal.
+
 ### WAL workers
 
 With [`spec.follow.walWorkers`](../configuration.md#wal-workers) set to a value N above 1, each worker uses its own slot, WAL sender, origin, and target connections.

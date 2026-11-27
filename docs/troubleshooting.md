@@ -57,6 +57,7 @@ When the pod is already gone, the condition carries only the Job message.
 | [Phase `Failed`, reason `DiskFull`, after one attempt](#phase-failed-with-reason-diskfull) | Workers and cluster objects |
 | [Phase `Failed`, reason `SchemaDrift`, after one attempt](#phase-failed-with-reason-schemadrift) | Workers and cluster objects |
 | [Phase `Failed`, reason `SnapshotLost`](#phase-failed-with-reason-snapshotlost) | Workers and cluster objects |
+| [Phase `Failed`, reason `WorkDirLayoutRefused`](#phase-failed-with-reason-workdirlayoutrefused) | Workers and cluster objects |
 | [Status and metrics lag behind the worker](#status-updates-lag-behind-the-worker) | Workers and cluster objects |
 | [Scrapes return 401](#scrapes-return-401) | Metrics and dashboards |
 | [Scrapes return 403](#scrapes-return-403) | Metrics and dashboards |
@@ -1026,6 +1027,28 @@ In the other order, that slot and origin would then belong to the new Migration.
 With `dropIfExists: true`, the operator starts over on its own and emits a `SnapshotLost` warning event.
 That attempt runs `pgcopydb stream cleanup` to drop the slot, the automatic publication, and the target origin.
 Then it runs `pgcopydb clone --follow --restart --drop-if-exists`.
+
+### Phase `Failed` with reason `WorkDirLayoutRefused`
+
+Phase `Failed` with reason `WorkDirLayoutRefused` means that pgcopydb refused the work volume before it wrote to it.
+The volume records the [follow mode](configuration.md#follow-mode) of the run that started it, and this attempt brought the other mode.
+The condition message carries the `Refusing the work directory: ...` line.
+That line names both modes.
+It also names the two ways that pgcopydb offers: a resume in the recorded mode, or a `pgcopydb stream cleanup` and a start from the beginning.
+
+The operator takes neither way, because `spec.follow` is immutable.
+Every attempt of the Migration sends the mode of its spec, so every attempt meets the same refusal.
+The Migration fails on the first attempt that meets it, and the retry budget stays unspent.
+
+The operator creates one work volume per Migration, and deletes it with the Migration.
+A volume with no recorded mode counts as `sqlite`.
+A Migration that starts on a new volume therefore does not meet this refusal.
+The reason reports a volume that holds the data of a run in the other mode.
+An example is a volume that a restore put back into the claim `<migration>-work`.
+
+Delete the failed Migration, which deletes its work volume.
+Then create a new Migration.
+To keep the data of the refused volume, give the new Migration a `spec.follow.mode` that is equal to the mode that the refusal names first.
 
 ### Status updates lag behind the worker
 
