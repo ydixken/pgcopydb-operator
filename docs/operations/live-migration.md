@@ -296,6 +296,11 @@ During the build, the phase stays `CuttingOver`, and the replay position already
 Thus the `PgcopydbMigrationCutoverStalled` alert does not fire during the build.
 Use the worker logs to monitor the build.
 
+The bundled runner also stops a receive that already passed the cutover LSN.
+Before that fix, a receive on a quiet source read the new cutover LSN at a status.
+It never compared that LSN with the keepalive position that it already held.
+Thus it did not stop, and the cutover did not finish.
+
 pgcopydb exits with 0 only when every worker reached the same cutover LSN, and pgcopydb created the foreign keys and synced the sequences.
 When the run stops before that, pgcopydb exits with an error and logs that the foreign keys are pending.
 In step 5, the `<name>-verify` Job reads the replication origin of every worker.
