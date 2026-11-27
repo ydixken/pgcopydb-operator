@@ -18,8 +18,12 @@ Bytes come from `pg_table_size`, because its neighbours add the indexes or drop 
 `pg_table_size` would wait on a table a copy worker holds under AccessExclusiveLock: a whole-table copy, or every partition under a truncated parent.
 Such a table counts the bytes its own copy has streamed, which a target before PostgreSQL 14 cannot report, so it counts none there.
 This worker's backends are those named `pgcopydb...` from the sampler's own client address, so another migration's copy into the same database is not mistaken for this one's.
-Among them, a copy worker is one named a copy worker or whose last statement was a COPY, so the sample waits out an index worker's short ALTER on a copied table.
+Among them, a copy worker is one named a copy worker or whose last statement was a COPY.
 Unlike `stageScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
+Any other backend that holds or queues for an AccessExclusiveLock on a target table makes the sample skip that table: a queued request makes every later AccessShareLock wait too.
+An index worker does this for its short ALTER on a copied table, and a single-transaction pg_restore holds such locks until all of post-data commits, which can be hours.
+Such a table counts as done and is sized from `relpages` of the table and its TOAST relation, which need no lock.
+The source still waits on such a lock, up to its statement timeout.
 A failed side prints an empty row and parses to no sample, never to zero.
 
 ### Storage cannot tell an empty table from a copied one
