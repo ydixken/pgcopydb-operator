@@ -208,6 +208,8 @@ The task also excludes every spec labeled `chaos` or `flaky`, as the release-can
 The metrics specs skip unless `E2E_PROMETHEUS_URL` or `E2E_PROMETHEUS_PORT_FORWARD` is set.
 The WAL workers spec skips when the pgcopydb in the runner image does not have `--wal-workers`.
 It then adds a report entry that starts with `WAL WORKERS NOT TESTED`.
+The performance follow mode spec skips when that pgcopydb does not have `--follow-mode`.
+It then adds a report entry that starts with `FOLLOW MODE NOT TESTED`.
 
 Release candidates run the suite against CloudNativePG fixtures only.
 CI covers the code of external mode itself with unit tests.
