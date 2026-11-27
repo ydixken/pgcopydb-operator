@@ -17,8 +17,12 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -42,6 +46,10 @@ const (
 	// followModePreflightTail covers a whole preflight log, which is one line per check.
 	followModePreflightTail = 200
 )
+
+// cdcDir is the worker's change directory in the work volume: performance mode
+// keeps the raw spool here, sqlite mode its two stores.
+const cdcDir = pgcopydb.WorkDir + "/cdc"
 
 var _ = Describe("Follow mode", func() {
 	BeforeEach(resetMigrationPair)
@@ -117,6 +125,15 @@ func performanceCutover() {
 	Expect(pubs).To(HaveLen(4))
 	Expect(pubs[0]).To(Equal("1"), "no publication named %s on the source", slot)
 	Expect(pubs[1]).To(Equal("0"), "performance mode created a publication named %s_t<oid>", slot)
+
+	// One slot and one publication are also what sqlite mode at one worker leaves on
+	// the source, so the spool files are the only assertion that tells the modes apart.
+	By("spooling the changes raw, with neither SQLite store in the work volume")
+	Eventually(func(g Gomega) {
+		listing, err := cdcListing(name + "-run-1")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(rawSpoolVerdict(listing)).To(Succeed(), "%s holds:\n%s", cdcDir, listing)
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	By("stopping the writer and arming Automatic cutover")
 	last, err := w.stop()
@@ -242,4 +259,93 @@ func legacyRunnerPerformanceRefused() {
 	Expect(msg).To(ContainSubstring(legacyRunnerImage), "the message does not name the runner image")
 	Expect(msg).To(ContainSubstring("does not list "+pgcopydb.FollowModeFlag), "the message does not name the flag")
 	Expect(sourceSlotCount()).To(Equal("0"), "a refused Migration created a replication slot")
+}
+
+// cdcListing lists cdcDir in the running pod of job. A listing that cannot run
+// is an error, so missing spool files never read as a pass.
+func cdcListing(job string) (string, error) {
+	pods := &corev1.PodList{}
+	if err := k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+		client.MatchingLabels{batchv1.JobNameLabel: job}); err != nil {
+		return "", fmt.Errorf("listing the pods of Job %s: %w", job, err)
+	}
+	worker := ""
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			worker = pod.Name
+		}
+	}
+	if worker == "" {
+		return "", fmt.Errorf("Job %s has no running pod to list %s in", job, cdcDir)
+	}
+	execCtx, cancel := context.WithTimeout(ctx, e2eCommandTimeout)
+	defer cancel()
+	out, err := commandOutput(execCtx, exec.CommandContext, "kubectl",
+		"exec", "-n", nsE2E, worker, "--", "ls", "-1", cdcDir)
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		return "", fmt.Errorf("listing %s in pod %s: %w: %s", cdcDir, worker, err, exit.Stderr)
+	}
+	if err != nil {
+		return "", fmt.Errorf("listing %s in pod %s: %w", cdcDir, worker, err)
+	}
+	return string(out), nil
+}
+
+// rawSpoolVerdict reads a cdcDir listing: only performance mode writes the raw
+// spool files, and only sqlite mode writes the stores. A rotation or a cleanup
+// can leave a segment without its index file, so the files count as a set.
+func rawSpoolVerdict(listing string) error {
+	var segment, index, relation bool
+	for name := range strings.FieldsSeq(listing) {
+		switch {
+		case strings.Contains(name, "output.db"), strings.Contains(name, "replay.db"):
+			return fmt.Errorf("the SQLite store %s is in %s, so the follow is not on the raw spool", name, cdcDir)
+		case strings.HasSuffix(name, ".seg"):
+			segment = true
+		case strings.HasSuffix(name, ".idx"):
+			index = true
+		case name == "relation.log":
+			relation = true
+		}
+	}
+	if !segment || !index || !relation {
+		return fmt.Errorf("%s holds no raw spool: segment %t, index file %t, relation log %t",
+			cdcDir, segment, index, relation)
+	}
+	return nil
+}
+
+func TestRawSpoolVerdict(t *testing.T) {
+	const store = "SQLite store"
+	for _, tc := range []struct {
+		name, listing, want string
+	}{
+		{name: "a spool", listing: "0000000000000001.idx\n0000000000000001.seg\nrelation.log\n"},
+		{
+			name:    "the sqlite stores",
+			listing: "000000010000000001BF8B20-output.db\n000000010000000001BF8B20-replay.db\n",
+			want:    store,
+		},
+		{
+			name: "a store beside a spool",
+			listing: "0000000000000001.idx\n0000000000000001.seg\nrelation.log\n" +
+				"000000010000000001BF8B20-replay.db\n",
+			want: store,
+		},
+		{name: "an empty directory", want: "holds no raw spool"},
+		{name: "a segment alone", listing: "0000000000000001.seg\n", want: "holds no raw spool"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rawSpoolVerdict(tc.listing)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("rawSpoolVerdict(%q) = %v, want no error", tc.listing, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("rawSpoolVerdict(%q) = %v, want an error naming %q", tc.listing, err, tc.want)
+			}
+		})
+	}
 }
