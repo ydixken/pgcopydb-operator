@@ -5,7 +5,7 @@ Read the keywords MUST, SHOULD, and MAY as RFC 2119 describes them.
 
 This page covers the base clone (`pgcopydb clone`), the whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 The ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/).
-For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e).
+For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/bed923445a3c581c1170cc77a1041cd52075569f).
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record the scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot check.
 
@@ -74,9 +74,15 @@ The check matches that description, not only the flag name, because another pgco
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twenty-four pgcopydb versions, with different guarantees.
+The progress poll supports twenty-five pgcopydb versions, with different guarantees.
 
-The bundled runner, `0.18.168.ge8eec0f`, keeps the seven per-transaction SQLite statements of apply prepared, so apply uses less CPU ([fork PR #47](https://github.com/ydixken/pgcopydb/pull/47)).
+The bundled runner, `0.18.357.gbed9234`, accepts `--follow-mode` and can follow on the raw change spool ([fork PR #51](https://github.com/ydixken/pgcopydb/pull/51)).
+It applies an `UPDATE` or a `DELETE` to the named table only ([fork PR #48](https://github.com/ydixken/pgcopydb/pull/48)).
+It stores a `BEGIN` that `pgoutput` sends at `0/0` at the LSN of its first change ([fork PR #49](https://github.com/ydixken/pgcopydb/pull/49)).
+`pgcopydb stream apply --target -` prints every transaction ([fork PR #50](https://github.com/ydixken/pgcopydb/pull/50)).
+Receive asks the source for a reply when it reads a new endpos ([fork PR #54](https://github.com/ydixken/pgcopydb/pull/54)).
+
+`0.18.168.ge8eec0f` and later runners keep the seven per-transaction SQLite statements of apply prepared, so apply uses less CPU ([fork PR #47](https://github.com/ydixken/pgcopydb/pull/47)).
 
 `0.18.159.g9d8b660` and later runners do not copy the publications that pgcopydb creates on the source to the target ([fork PR #45](https://github.com/ydixken/pgcopydb/pull/45)).
 These are the automatic publication or, with `spec.follow.walWorkers` above 1, the per-table publications `<slot>_t<table oid>`.

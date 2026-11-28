@@ -243,6 +243,25 @@ func TestRunnerCanaryMatchesWalWorkersProbe(t *testing.T) {
 	}
 }
 
+// The preflight refuses spec.follow.mode performance when clone --help lacks
+// the flag; the canary fails the image build on the same probe.
+func TestRunnerCanaryMatchesFollowModeProbe(t *testing.T) {
+	want := "pgcopydb clone --help 2>&1 | grep -qF -- '" + pgcopydb.FollowModeFlag + "'"
+	if !strings.Contains(read(t, runnerDockerfile), want) {
+		t.Errorf("the runner canary does not assert the flag the preflight probe matches:\n  %s", want)
+	}
+}
+
+// WorkDirLayoutRefused is reported by prefix, so a reworded tail is fine but a
+// reworded prefix goes unrecognised and the Migration retries forever. The
+// refusal carries no flag or help text, so the canary greps the binary.
+func TestRunnerCanaryMatchesLayoutRefusedPrefix(t *testing.T) {
+	want := "grep -qF '" + pgcopydb.LayoutRefusedPrefix + "' /usr/local/lib/pgcopydb/pgcopydb"
+	if !strings.Contains(read(t, runnerDockerfile), want) {
+		t.Errorf("the runner canary does not assert the refusal prefix the log reader matches:\n  %s", want)
+	}
+}
+
 // A --platform here would copy an amd64 binary into the arm64 image, and the
 // canary below cannot catch it: binfmt runs the amd64 ELF natively on the
 // build host, so `pgcopydb --version` passes anyway.
@@ -1208,7 +1227,7 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 
 	// Upgrading the manager must retain counters for workers on all previous pins.
 	for _, version := range []string{
-		want, "0.18.159.g9d8b660", "0.18.157.g5fa0950", "0.18.144.g86bf908",
+		want, "0.18.168.ge8eec0f", "0.18.159.g9d8b660", "0.18.157.g5fa0950", "0.18.144.g86bf908",
 		"0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97",
 		"0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee",
 		"0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc",
