@@ -228,6 +228,8 @@ It also does not measure applied-data throughput.
 Other supported runner versions are different.
 See [client tool versions](../reference/prerequisites.md#client-tool-versions).
 Receive batching does not make these LSN slopes into end-to-end throughput measurements.
+These statements hold in both [follow modes](../configuration.md#follow-mode).
+In `performance` mode, the replay gauge reports the position up to which apply durably committed the spooled changes.
 It also does not make the [drain-verification gate](live-migration.md#manual-cutover-runbook) unnecessary.
 
 ## Dashboards

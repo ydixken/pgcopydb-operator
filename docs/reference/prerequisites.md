@@ -157,6 +157,7 @@ A retry that finds the slot of an earlier attempt and still has tables to copy s
 `0.18.98.g944abcc` copies the tables of either retry under a newer snapshot, and apply can then stop on a duplicate key ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378)).
 
 `0.18.98.g944abcc` added the closed `output.db` fix.
+This fix is about [`sqlite` mode](../configuration.md#follow-mode), which keeps the `output.db` files.
 During streaming, apply stays on an `output.db` that receive closed, until apply applies every committed transaction in that file.
 `0.18.94.gbaa94ee` can move to the next file and skip those transactions ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 
@@ -791,6 +792,9 @@ With `sqlite` or no mode, preflight does not do this check.
 The work volume records the mode of the run that started it, and pgcopydb refuses a run that brings the other mode.
 The operator reports that refusal as the terminal reason `WorkDirLayoutRefused` ([Phase `Failed` with reason `WorkDirLayoutRefused`](../troubleshooting.md#phase-failed-with-reason-workdirlayoutrefused)).
 A volume with no recorded mode counts as `sqlite`, so a Migration in sqlite mode does not meet this refusal.
+
+In `performance` mode, pgcopydb keeps no `output.db` and no `replay.db` file.
+The items of this page that name those files are therefore about `sqlite` mode.
 
 ### WAL workers
 

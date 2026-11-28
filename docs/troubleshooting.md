@@ -808,8 +808,9 @@ Phase `Failed` with reason `DrainIncomplete` has two causes:
 For a missing origin, the Job stops before the compare, and its log shows the `psql` error that names the origin.
 For missing changes, `pgcopydb compare data` reported differing tables.
 The typical cause is a crash inside the drain window.
-After such a crash, pgcopydb `--resume` exits 0 without replaying.
-With a runner older than `0.18.98.g944abcc`, apply that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
+In [`sqlite` mode](configuration.md#follow-mode), pgcopydb `--resume` exits 0 after such a crash without replaying.
+In `performance` mode, the bundled runner records the drain as done only at its end, and a resume without that record continues to the cutover LSN.
+With a runner older than `0.18.98.g944abcc`, apply in `sqlite` mode that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 
 Do NOT switch applications to the target.
 No data is lost at the source: the slot stays and retains WAL.
@@ -982,12 +983,15 @@ Phase `Failed` with reason `DiskFull` after a single attempt means that the work
 The condition message carries the matched line.
 `database or disk is full` comes from pgcopydb's SQLite catalogs.
 `No space left on device` comes from a file that pgcopydb or pg_dump writes under the work directory.
+In [`performance` mode](configuration.md#follow-mode), a spool write that runs out of space gives the same `No space left on device` text.
+The worker then exits with an error, and the ERROR or FATAL line that carries the text names the `.seg` file that it could not write.
 
 Increase `spec.workVolume.size`.
 Then create a new Migration.
 A terminal state is absorbing (see [Retries and resume](operations/lifecycle.md#retries-and-resume)), so this Migration cannot resume.
 On a live migration, the change spool grows with source writes until cutover.
 So size the work volume for the writes that the migration has to carry.
+In `performance` mode, that spool is the raw pgoutput stream in segment files, and pgcopydb deletes a segment only after apply moved past its changes.
 
 When the target has no more disk space (`could not extend file`) or shared memory (`could not resize shared memory segment`), the reason is not `DiskFull`.
 Those attempts keep normal retries, because space or load on the target can change between attempts.

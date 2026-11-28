@@ -285,8 +285,9 @@ fi
 }
 
 // buildVerifyJob checks that the target applied everything up to endpos. The
-// worker's exit 0 is no proof of a drain: after a crash between endpos-set and
-// drain-complete, --resume short-circuits and exits 0 anyway.
+// worker's exit 0 is no proof of a drain: in sqlite mode, and on a runner without
+// a follow mode, --resume after a crash between endpos-set and drain-complete
+// short-circuits and exits 0 anyway.
 func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
 	// WAL filtering and skipped records make gap/replay_lsn unsafe tolerances.
