@@ -108,7 +108,7 @@ const SamplerMarker = "/* pgcopydb-operator progress sample */"
 // sampleScript prints the clone stage, six source figures, five target figures, the
 // tables still owed and the SyncRep count; a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
 var sampleScript = sampleSQL + stageScript + syncRepScript + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
-present="case when t.copying then false else $populated end"
+present="case when t.copying then false when t.held then true else $populated end"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
 user_tables="where c.relkind = 'r'
@@ -131,10 +131,17 @@ t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "` + SamplerMarker + ` with mine as (s
   exclusive as (select distinct l.relation from pg_locks l
     where l.locktype = 'relation' and l.mode = 'AccessExclusiveLock' and l.granted and l.pid in (select pid from mine where copier)
       and l.database = (select d.oid from pg_database d where d.datname = current_database())),
-  t as (select c.oid, n.nspname, c.relname, k.relid is not null or e.relation is not null as copying,
-      case when e.relation is not null then coalesce(k.bytes, 0) else pg_table_size(c.oid) end as bytes $tables
+  held as (select distinct l.relation from pg_locks l
+    where l.locktype = 'relation' and l.mode = 'AccessExclusiveLock' and not exists (select 1 from mine m where m.copier and m.pid = l.pid)
+      and l.database = (select d.oid from pg_database d where d.datname = current_database())),
+  t as (select c.oid, n.nspname, c.relname, k.relid is not null or e.relation is not null as copying, h.relation is not null as held,
+      case when e.relation is not null then coalesce(k.bytes, 0)
+        when h.relation is not null then (c.relpages + coalesce(tc.relpages, 0))::bigint * current_setting('block_size')::bigint
+        else pg_table_size(c.oid) end as bytes $tables
+    left join pg_class tc on tc.oid = c.reltoastrelid
     left join copying k on k.relid = c.oid
-    left join exclusive e on e.relation = c.oid $user_tables)
+    left join exclusive e on e.relation = c.oid
+    left join held h on h.relation = c.oid $user_tables)
   select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)") ||
   { t=; printf 'target_error=%s\n' "$(why)"; }
 case $t in
@@ -142,7 +149,7 @@ case $t in
   *) landed="select null::text, false where false" ;;
 esac
 t=${t%%|*}
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "` + SamplerMarker + ` with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, pg_table_size(c.oid) as bytes $tables
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "` + SamplerMarker + ` with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, false as held, pg_table_size(c.oid) as bytes $tables
     join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname $user_tables)
   select $row || ' ' || (select count(*) || '|' || coalesce(string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname), '')
     from t where not t.populated and $populated)") ||
