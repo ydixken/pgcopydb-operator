@@ -331,8 +331,8 @@ func TestStageQueryOnLiveInstance(t *testing.T) {
 	}
 }
 
-// A held relation lock must cancel the sampled side without losing its peer.
-// The lock here belongs to no copy, so the target waits on it as before.
+// A held relation lock on the source must cancel that side without losing its
+// peer. The target skips such a table instead (TestProgressSampleSkipsAForeignExclusiveLock).
 func TestProgressRelationLocks(t *testing.T) {
 	admin := testPGURI(t)
 	const source, target = "source", "target"
@@ -345,7 +345,7 @@ func TestProgressRelationLocks(t *testing.T) {
 		sqlOutput(t, uri, "CREATE TABLE items (id integer); INSERT INTO items VALUES (1)")
 		uris = append(uris, uri)
 	}
-	for i, uri := range uris {
+	for i, uri := range uris[:1] {
 		t.Run([]string{source, target}[i], func(t *testing.T) {
 			blocker := exec.Command("psql", namedURI(t, uri, "", "progress_blocker"), "-XqtA", "-v", "ON_ERROR_STOP=1")
 			stdin, err := blocker.StdinPipe()
@@ -404,7 +404,7 @@ func TestProgressRelationLocks(t *testing.T) {
 					t.Fatal("blocked sampler exceeded SQL budget")
 				}
 				s := parseSample(out.Bytes())
-				if s.Counts != nil || (i == 0 && (s.SourceSize != nil || s.TargetSize == nil)) || (i == 1 && (s.TargetSize != nil || s.SourceSize == nil)) {
+				if s.Counts != nil || s.SourceSize != nil || s.TargetSize == nil {
 					t.Fatal("blocked sample lost the healthy side or invented counts")
 				}
 				if sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name=current_setting('application_name') and pid<>pg_backend_pid()") != "0" {
@@ -454,8 +454,8 @@ func openCopy(t *testing.T, uri, app, setup, table string) {
 }
 
 // holdOpen sends script to a psql session that stays connected, and so keeps
-// its transaction open, until the test ends. It returns the session's input.
-func holdOpen(t *testing.T, uri, app, script string) io.Writer {
+// its transaction open, until the test ends.
+func holdOpen(t *testing.T, uri, app, script string) {
 	t.Helper()
 	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
 	stdin, err := cmd.StdinPipe()
@@ -470,7 +470,6 @@ func holdOpen(t *testing.T, uri, app, script string) io.Writer {
 	if _, err = io.WriteString(stdin, script); err != nil {
 		t.Fatal(err)
 	}
-	return stdin
 }
 
 // pgcopydbWorker names a session the way pgcopydb names its copy workers.
@@ -544,35 +543,47 @@ func TestProgressSampleReadsAnExclusiveCopy(t *testing.T) {
 	}
 }
 
-// pgcopydb's index workers take AccessExclusiveLock too, on a table already
-// copied, to attach a constraint to its index. That table stays done and
-// sized on disk, so the sample waits out the short ALTER instead.
-func TestProgressSampleWaitsOutAnIndexWorkersLock(t *testing.T) {
-	source, target := sampleDatabases(t, "index_lock", `CREATE TABLE items (id integer, note text);
+// A table another session holds or queues for under AccessExclusiveLock is not
+// read: pgcopydb's index workers attach a constraint to a copied table that
+// way, and pg_restore holds such locks until post-data commits. The table
+// stays done and is sized from the catalog, so the sample never waits.
+func TestProgressSampleSkipsAForeignExclusiveLock(t *testing.T) {
+	const setup = `CREATE TABLE items (id integer, note text);
 INSERT INTO items SELECT i, 'x' FROM generate_series(1, 20000) i;
-CREATE UNIQUE INDEX items_idx ON items (id)`)
-	alter := holdOpen(t, target, "pgcopydb[1] create index public.items_idx",
-		"BEGIN;\nALTER TABLE items ADD CONSTRAINT items_pk PRIMARY KEY USING INDEX items_idx;\n")
-	waitFor(t, 5*time.Second, "the index worker never held items exclusively", func() bool {
-		return sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted") == "1"
-	})
-	// Commit once the sampler waits on the lock. This goroutine cannot fail
-	// the test, so it commits at its deadline regardless.
-	go func() {
-		waiting := "select count(*) from pg_stat_activity where application_name = current_setting('application_name') and pid <> pg_backend_pid() and wait_event_type = 'Lock'"
-		for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
-			if out, _ := exec.Command("psql", target, "-XqtAc", waiting).Output(); strings.TrimSpace(string(out)) == "1" {
-				break
+CREATE UNIQUE INDEX items_idx ON items (id)`
+	for _, tc := range []struct {
+		name    string
+		granted string
+		hold    func(t *testing.T, target string)
+	}{
+		{"index worker holds it", "true", func(t *testing.T, target string) {
+			holdOpen(t, target, "pgcopydb[1] create index public.items_idx",
+				"BEGIN;\nALTER TABLE items ADD CONSTRAINT items_pk PRIMARY KEY USING INDEX items_idx;\n")
+		}},
+		// A queued AccessExclusiveLock makes every later AccessShareLock wait behind it.
+		{"restore queues for it", "false", func(t *testing.T, target string) {
+			holdOpen(t, target, "progress_reader", "BEGIN;\nSELECT count(*) FROM items;\n")
+			waitFor(t, 5*time.Second, "the reader never held items", func() bool {
+				return sqlOutput(t, target, "select count(*) from pg_locks l join pg_stat_activity a using (pid) where a.application_name = 'progress_reader' and l.relation = 'items'::regclass and l.granted") == "1"
+			})
+			holdOpen(t, target, "pg_restore", "BEGIN;\nLOCK items IN ACCESS EXCLUSIVE MODE;\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, target := sampleDatabases(t, "foreign_lock", setup)
+			tc.hold(t, target)
+			waitFor(t, 5*time.Second, "items never had the exclusive lock", func() bool {
+				return sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted = "+tc.granted) == "1"
+			})
+			c := runSample(t, source, target).Counts
+			if c.TablesTotal != 1 || c.TablesDone != 1 || c.EmptyOnTarget != "" {
+				t.Fatalf("tables = %d of %d owing %q, want 1 of 1: a foreign lock is no copy", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
 			}
-		}
-		_, _ = io.WriteString(alter, "COMMIT;\n")
-	}()
-	c := runSample(t, source, target).Counts
-	if c.TablesTotal != 1 || c.TablesDone != 1 || c.EmptyOnTarget != "" {
-		t.Fatalf("tables = %d of %d owing %q, want 1 of 1: an index worker's lock is no copy", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
-	}
-	if want := sqlOutput(t, target, "select pg_table_size('items')"); fmt.Sprint(c.BytesDone) != want {
-		t.Fatalf("bytes done = %d, want %s, the table's size on disk", c.BytesDone, want)
+			want := sqlOutput(t, target, "select (c.relpages + coalesce(x.relpages, 0))::bigint * current_setting('block_size')::bigint from pg_class c left join pg_class x on x.oid = c.reltoastrelid where c.relname = 'items'")
+			if want == "0" || fmt.Sprint(c.BytesDone) != want {
+				t.Fatalf("bytes done = %d, want %s, the table's pages in the catalog", c.BytesDone, want)
+			}
+		})
 	}
 }
 

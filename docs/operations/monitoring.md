@@ -117,8 +117,10 @@ The "Exists" column is the contract for when a series is present:
   A table also does not count as done when one of pgcopydb's copy workers holds it under an exclusive lock.
   On a PostgreSQL 14 or later target, a table that the worker still copies into also does not count as done.
   The sample never reads such a table, because its rows stay invisible until that copy commits.
-  An index worker takes a lock to attach a constraint `USING INDEX` to a copied table.
-  This lock is short, and the sample waits for it.
+  Another session can hold an exclusive lock on a table, or wait for one.
+  For example, an index worker attaches a constraint `USING INDEX` to a copied table, and pg_restore keeps its locks until the post-data section commits.
+  The sample does not read such a table on the target and does not wait for the lock.
+  The table counts as done, and its bytes come from the page counts in `pg_class`, which can be older than the table.
   The sample needs psql and GNU `timeout` in the runner.
   Where the operator can read pgcopydb's own accounting, that accounting then replaces the sample.
   For a plain clone, this occurs at clone completion.
