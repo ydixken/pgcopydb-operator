@@ -40,7 +40,7 @@ import (
 // The follow worker keeps observation traffic running between held locks. The
 // locks stall only the background sampler, not the reconcile worker, so it is not Serial.
 var _ = Describe("Progress sampler bounds", SpecPriority(2), func() {
-	It("releases blocked source and target samplers across repeated polls and recovers", func() {
+	It("releases a blocked source sampler, skips a locked target table, and recovers", func() {
 		const name = "e2e-progress-bounds"
 		const table = progressProbeTable
 		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
@@ -85,16 +85,74 @@ var _ = Describe("Progress sampler bounds", SpecPriority(2), func() {
 			Expect(baseline.BytesTotal.Value()).To(BeNumerically(">", 0))
 			Expect(baseline.BytesDone.Value()).To(BeNumerically(">", 0))
 			release := holdProgressLock([]string{sourceKey, targetKey}[side], cluster, table)
+			lockedAt := time.Now()
+			// Which of the sampler's own backends queues behind the blocker. The source
+			// still waits on such a lock; the target skips the table instead.
+			blockedSampler := func() string {
+				return psql(cluster, fmt.Sprintf(`SELECT a.pid::text FROM pg_stat_activity a
+WHERE a.pid<>pg_backend_pid() AND %s AND a.wait_event_type='Lock'
+AND EXISTS (SELECT 1 FROM pg_stat_activity b WHERE b.application_name='e2e_progress_blocker'
+AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
+			}
 			func() {
 				defer release()
+				if cluster == targetCluster {
+					// A table another session holds under AccessExclusiveLock counts as
+					// done and is sized from relpages, so nothing of ours waits here and
+					// status keeps advancing instead of freezing until the lock is gone.
+					Eventually(func(g Gomega) {
+						observed := readMigration().Status.Progress.DeepCopy()
+						g.Expect(observed).NotTo(BeNil())
+						g.Expect(observed.ObservedAt).NotTo(BeNil())
+						g.Expect(observed.ObservedAt.Time).To(BeTemporally(">", lockedAt),
+							"a sample taken under the lock must reach status")
+					}, 30*time.Second, time.Second).Should(Succeed())
+					windowStart := time.Now()
+					Consistently(func(g Gomega) {
+						g.Expect(blockedSampler()).To(BeEmpty(),
+							"no sampler may wait on the test-owned relation lock on the target")
+						m := readMigration()
+						observed := m.Status.Progress.DeepCopy()
+						g.Expect(observed).NotTo(BeNil())
+						g.Expect(observed.ObservedAt).NotTo(BeNil())
+						g.Expect(observed.ObservedAt.Time).To(BeTemporally(">", lockedAt))
+						g.Expect(observed.BytesTotal).NotTo(BeNil())
+						g.Expect(observed.BytesDone).NotTo(BeNil())
+						// The source leg is untouched, so its total holds. Only the target's
+						// bytes move: relpages is an estimate VACUUM and ANALYZE maintain.
+						g.Expect(observed.BytesTotal.Value()).To(BeNumerically("~",
+							baseline.BytesTotal.Value(), progressSizeDrift))
+						g.Expect(observed.BytesDone.Value()).To(BeNumerically(">", 0),
+							"the target side must stay sized rather than be lost to the lock")
+						counts, baseCounts := *observed, *baseline
+						counts.ObservedAt, counts.BytesTotal, counts.BytesDone = nil, nil, nil
+						baseCounts.ObservedAt, baseCounts.BytesTotal, baseCounts.BytesDone = nil, nil, nil
+						g.Expect(counts).To(Equal(baseCounts), "a locked target table must still count as done")
+						g.Expect(m.Status.Attempts).To(Equal(int32(1)))
+						g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
+					}, 20*time.Second, 2*time.Second).Should(Succeed())
+					Eventually(func(g Gomega) {
+						observed := readMigration().Status.Progress
+						g.Expect(observed).NotTo(BeNil())
+						g.Expect(observed.ObservedAt).NotTo(BeNil())
+						g.Expect(observed.ObservedAt.Time).To(BeTemporally(">", windowStart),
+							"the target sampler must still publish at the end of the hold")
+					}, 30*time.Second, time.Second).Should(Succeed())
+					// No session is blocked, so none is cancelled and none has to
+					// disappear. What the cleanup contract still reaches is the blocker,
+					// the worker cohort, and backends left over from an earlier sample.
+					Expect(psql(cluster, progressBlockerCount)).To(Equal("1"))
+					Expect(runnerProgressProcesses(runner, false)).To(ContainElements(workers),
+						"skipping a locked table must preserve the worker processes")
+					Expect(psql(cluster, "SELECT count(*) FROM pg_stat_activity a WHERE "+progressSamplerMatch)).
+						To(BeElementOf("0", "1"), "earlier samples must not accumulate backends")
+					return
+				}
 				var held *v1beta1.CloneProgress
 				for poll := range 4 {
 					var backend string
 					Eventually(func() string {
-						backend = psql(cluster, fmt.Sprintf(`SELECT a.pid::text FROM pg_stat_activity a
-WHERE a.pid<>pg_backend_pid() AND %s AND a.wait_event_type='Lock'
-AND EXISTS (SELECT 1 FROM pg_stat_activity b WHERE b.application_name='e2e_progress_blocker'
-AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
+						backend = blockedSampler()
 						return backend
 					}, time.Minute, 200*time.Millisecond).ShouldNot(BeEmpty(),
 						"must observe a sampler waiting on the test-owned relation lock")

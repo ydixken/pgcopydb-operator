@@ -186,7 +186,7 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1
 		}
 
 		for i, side := range sides {
-			By("observing and cancelling a sampler blocked on the " + string(side) + " fixture lock")
+			By("sampling the " + string(side) + " side while the test holds its fixture lock")
 			release := holdProgressLock(string(side), clusters[i], progressPoolTable)
 			func() {
 				defer release()
@@ -201,28 +201,39 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1
 					got, sampleErr := poller.Sample(sampleCtx, nsE2E, job.Name, false)
 					done <- result{got, sampleErr}
 				}()
-				Eventually(func() string {
+				blocked := func() string {
 					return psql(clusters[i], fmt.Sprintf(`SELECT count(*) FROM pg_stat_activity a
 WHERE a.pid=%d AND %s AND a.wait_event_type='Lock'
 AND EXISTS (SELECT 1 FROM pg_stat_activity b WHERE b.application_name='e2e_progress_blocker'
 AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i], progressSamplerMatch))
-				}, 15*time.Second, 200*time.Millisecond).Should(Equal("1"),
-					"the original pooled backend must wait on the test-owned lock before cancellation")
+				}
 				var completed result
-				Eventually(done, 8*time.Second).Should(Receive(&completed))
-				Expect(progressPoolCommandError(completed.err)).NotTo(HaveOccurred(), "blocked sampler exec failed")
-				Expect(completed.sample).NotTo(BeNil())
-				Expect(completed.sample.Counts).To(BeNil())
 				if side == conn.Source {
+					Eventually(blocked, 15*time.Second, 200*time.Millisecond).Should(Equal("1"),
+						"the original pooled backend must wait on the test-owned lock before cancellation")
+					Eventually(done, 8*time.Second).Should(Receive(&completed))
+					Expect(progressPoolCommandError(completed.err)).NotTo(HaveOccurred(), "blocked sampler exec failed")
+					Expect(completed.sample).NotTo(BeNil())
+					Expect(completed.sample.Counts).To(BeNil())
 					Expect(completed.sample.SourceSize).To(BeNil())
 					Expect(completed.sample.TargetSize).NotTo(BeNil())
 					Expect(*completed.sample.TargetSize).To(BeNumerically(">", 0))
 				} else {
-					Expect(completed.sample.TargetSize).To(BeNil())
-					Expect(completed.sample.SourceSize).NotTo(BeNil())
-					Expect(*completed.sample.SourceSize).To(BeNumerically(">", 0))
-					// The count runs in its own call before the size query, so the lock leaves it known.
+					// The target sample skips a table another session holds under
+					// AccessExclusiveLock and sizes it from relpages, so the pooled backend
+					// never queues behind the blocker and the sample loses no side.
+					Consistently(blocked, 10*time.Second, 200*time.Millisecond).Should(Equal("0"),
+						"the pooled backend must not wait on the test-owned lock")
+					Eventually(done, 20*time.Second).Should(Receive(&completed))
+					Expect(progressPoolCommandError(completed.err)).NotTo(HaveOccurred(), "sampler exec failed under the lock")
+					Expect(completed.sample).NotTo(BeNil())
+					assertComplete(completed.sample)
 					assertNoSyncRepWait(completed.sample)
+					Expect(completed.sample.Counts.TablesTotal).To(Equal(baseline.Counts.TablesTotal))
+					Expect(completed.sample.Counts.TablesDone).To(Equal(baseline.Counts.TablesDone),
+						"a table another session locks exclusively must still count as done")
+					Expect(completed.sample.Counts.IndexesTotal).To(Equal(baseline.Counts.IndexesTotal))
+					Expect(completed.sample.Counts.IndexesDone).To(Equal(baseline.Counts.IndexesDone))
 				}
 				Expect(psql(clusters[i], progressBlockerCount)).To(Equal("1"))
 				assertRestored()
