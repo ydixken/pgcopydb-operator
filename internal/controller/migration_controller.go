@@ -110,6 +110,10 @@ const reasonCloneIncomplete = "CloneIncomplete"
 // it latches the start-over (see snapshotLost); without dropIfExists it is terminal.
 const reasonSnapshotLost = "SnapshotLost"
 
+// reasonLayoutRefused: pgcopydb refused a work directory that records the other
+// follow mode. spec.follow is immutable, so every attempt brings the same mode back.
+const reasonLayoutRefused = "WorkDirLayoutRefused"
+
 // LogReader fetches worker pod logs so terminal errors reach status; nil
 // degrades to the Job's own condition message (envtest has no pods). The
 // timestamped stream is used for follow completion and zombie detection.
@@ -1156,6 +1160,16 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 		terminal, what, line = "SchemaDrift", "a missing target column", pgcopydb.SchemaDriftLine([]byte(tail))
 		remedy = "; DDL is not replicated: create a new Migration, which copies the schema from the source again," +
 			" and run no DDL during the migration window"
+	}
+	// The work directory records the follow mode it was started in, and spec.follow
+	// is immutable, so the mode the next attempt brings is the one just refused.
+	// It is checked before the lost snapshot so the startOver rule below cannot
+	// reach it: a start-over keeps the volume, and so the recorded mode.
+	if line == "" {
+		terminal, what, line = reasonLayoutRefused, "a follow mode the work directory refuses",
+			pgcopydb.LayoutRefusedLine([]byte(tail))
+		remedy = "; the work directory was started in the other follow mode and spec.follow is immutable:" +
+			" create a new Migration, which starts on a new work volume, or one whose spec.follow.mode matches the directory"
 	}
 	// A lost snapshot fails every resume alike, but a start-over can fix it once
 	// dropIfExists lets the restore replace what the earlier attempts left.

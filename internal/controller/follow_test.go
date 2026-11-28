@@ -1127,6 +1127,49 @@ var _ = Describe("Migration Controller follow mode", func() {
 			[]string{"attempt 2 failed: "}),
 	)
 
+	// A performance follow whose work directory was written in sqlite mode: the
+	// fork refuses it before it writes (fork:snapshot.c:825, proven by F18).
+	const refusedLayout = `{"timestamp":"2026-11-27 09:12:44.108","pid":1,"error_level":8,"error_severity":"FATAL","file_name":"snapshot.c","file_line_num":825,"message":"Refusing the work directory: it was started with --follow-mode performance, and this run uses --follow-mode sqlite; resume with --follow-mode performance, or run pgcopydb stream cleanup and start over with --restart"}` + "\n"
+
+	DescribeTable("ends a follow whose work directory records the other follow mode",
+		func(name string, dropIfExists bool) {
+			defer removeMigration(ctx, name)
+			r := followReconciler(&fakeSentinel{})
+			m := followMigration(name, v1beta1.CutoverManual)
+			m.Spec.Follow.Mode = v1beta1.FollowModePerformance
+			m.Spec.Clone.DropIfExists = dropIfExists
+			m.Spec.BackoffLimit = 3
+			Expect(k8sClient.Create(ctx, m)).To(Succeed())
+			passPreflight(r, name)
+			reconcileAndGet(ctx, r, name) // run-1
+			rec := r.Recorder.(*events.FakeRecorder)
+			drainEvents(rec)
+
+			m = failAttempt(r, name, 1, refusedLayout)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+			failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+			Expect(failed.Reason).To(Equal(reasonLayoutRefused))
+			Expect(failed.Message).To(ContainSubstring(pgcopydb.LayoutRefusedPrefix))
+			Expect(failed.Message).To(ContainSubstring("create a new Migration"))
+			Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted).Reason).To(Equal("CloneFailed"))
+
+			// The budget is untouched and the verdict still terminal, so the
+			// reason, not an empty budget, ended the Migration. dropIfExists
+			// buys no start-over: a fresh directory still records the mode
+			// spec.follow pins, and spec.follow is immutable.
+			got := drainEvents(rec)
+			Expect(got).To(ContainElement(ContainSubstring(reasonLayoutRefused)))
+			Expect(got).NotTo(ContainElement(ContainSubstring("starts over")))
+			Expect(got).NotTo(ContainElement(ContainSubstring("AttemptFailed")))
+			Expect(m.Status.RetryGate).To(BeNil())
+			Expect(m.Status.Attempts).To(Equal(int32(1)))
+			Expect(errors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: name + "-run-2", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+		},
+		Entry("without dropIfExists", "mig-follow-layout-refused", false),
+		Entry("with dropIfExists", "mig-follow-layout-dropped", true),
+	)
+
 	// A follow that a signal stops short of endpos exits non-zero, so the
 	// worker Job fails while the Migration is cutting over. Its last lines are
 	// the spool's own (pgcopydb 0.18.159.g9d8b660 ld_stream.c:1387 and

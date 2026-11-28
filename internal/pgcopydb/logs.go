@@ -184,6 +184,20 @@ func SnapshotLostLine(raw []byte) string {
 	})
 }
 
+// LayoutRefusedPrefix is the prefix of the fork's refusal to receive or apply in
+// a work directory that records the other follow mode (copydb_check_cdc_layout).
+// The runner canary asserts the bundled pgcopydb still prints it.
+const LayoutRefusedPrefix = "Refusing the work directory: "
+
+// LayoutRefusedLine returns that refusal, or "". The recorded mode of a work
+// directory does not change between attempts, and spec.follow is immutable, so
+// the next attempt brings the same mode back to the same directory.
+func LayoutRefusedLine(raw []byte) string {
+	return recentSevereLine(raw, func(msg string) bool {
+		return strings.HasPrefix(msg, LayoutRefusedPrefix)
+	})
+}
+
 // recentSevereLine returns the first severe line in the terminal window that
 // match accepts, or "".
 func recentSevereLine(raw []byte, match func(string) bool) string {
