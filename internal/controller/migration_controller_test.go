@@ -293,6 +293,32 @@ var _ = Describe("Migration Controller", func() {
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 	})
 
+	// A Migration stored under an older CRD has no follow.mode, so this object is one.
+	It("runs a follow Migration without a mode as before and lets it change", func() {
+		for _, tc := range []struct {
+			name    string
+			workers int32
+			tables  []string
+		}{
+			{"mig-no-mode", 0, nil},
+			{"mig-no-mode-workers", 3, []string{"app.orders"}},
+		} {
+			m := validMigration(tc.name)
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, WalWorkers: tc.workers, HighTrafficTables: tc.tables}
+			Expect(k8sClient.Create(ctx, m)).To(Succeed())
+			DeferCleanup(removeMigration, ctx, tc.name)
+			passGate(ctx, newReconciler(), tc.name)
+
+			m = getMigration(tc.name)
+			Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated)).To(BeTrue())
+			env := fetchJob(ctx, tc.name+"-run-1").Spec.Template.Spec.Containers[0].Env
+			Expect(env).NotTo(ContainElement(HaveField("Name", "PGCOPYDB_FOLLOW_MODE")))
+
+			m.Spec.Cutover.Approved = true
+			Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		}
+	})
+
 	It("puts the major version gate in the preflight Job when requested", func() {
 		const name = "mig-same-major"
 		defer removeMigration(ctx, name)

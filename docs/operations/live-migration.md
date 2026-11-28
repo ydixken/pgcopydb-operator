@@ -137,17 +137,19 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports the receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the replay position of the walsender, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `0.18.168.ge8eec0f`, runs target COMMITs with `synchronous_commit=on` and checks the result of each COMMIT before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.357.gbed9234`, runs target COMMITs with `synchronous_commit=on` and checks the result of each COMMIT before it reports their replay progress.
 On a target with synchronous standbys, each of those COMMITs waits until a standby acknowledges it, with or without [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target).
 `CommitsBlocked` becomes True when two samples in a row show a wait of 30 seconds or more.
 See [Commits blocked on synchronous replication](../troubleshooting.md#commits-blocked-on-synchronous-replication).
 If a proxy cuts the apply connection during such a wait, its backend still waits on the target and holds the replication origin.
 The next attempt resumes only when the [retry gate](lifecycle.md#retries-and-resume) finds that this session is gone and that a standby acknowledged a test commit.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e/src/bin/pgcopydb/ld_stream.c#L1676-L1701) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/bed923445a3c581c1170cc77a1041cd52075569f/src/bin/pgcopydb/ld_stream.c#L1910-L1935) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
+These statements hold in both [follow modes](../configuration.md#follow-mode).
+In `performance` mode, `replayLSN` reports the position up to which apply durably committed the spooled changes.
 Other supported runner versions differ.
 See [client tool versions](../reference/prerequisites.md#client-tool-versions).
 After cutover, when each target replication origin (one for each WAL worker) is exactly on the frozen endpos, the drain verification proves this.
@@ -155,6 +157,7 @@ Where an origin is not on endpos, the drain verification compares content.
 In the first case, the proof depends only on the origin bookkeeping of the runner.
 
 > [!warning]
+> No runner in this list has a follow mode, so every item of this warning is about [`sqlite` mode](../configuration.md#follow-mode).
 > Runners older than `0.18.70.gbb8dbfc` can lose committed source changes during follow without an error.
 > They skip a transaction that began before another one committed ([#356](https://github.com/ydixken/pgcopydb-operator/issues/356)).
 > They keep one row for each heap page of a source `COPY` ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)).
@@ -292,6 +295,11 @@ Measure the build in a test migration of the same data, and include it in the wr
 During the build, the phase stays `CuttingOver`, and the replay position already equals the cutover LSN.
 Thus the `PgcopydbMigrationCutoverStalled` alert does not fire during the build.
 Use the worker logs to monitor the build.
+
+The bundled runner also stops a receive that already passed the cutover LSN.
+Before that fix, a receive on a quiet source read the new cutover LSN at a status.
+It never compared that LSN with the keepalive position that it already held.
+Thus it did not stop, and the cutover did not finish.
 
 pgcopydb exits with 0 only when every worker reached the same cutover LSN, and pgcopydb created the foreign keys and synced the sequences.
 When the run stops before that, pgcopydb exits with an error and logs that the foreign keys are pending.

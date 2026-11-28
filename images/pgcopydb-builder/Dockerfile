@@ -9,9 +9,13 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#47 caches the seven per-transaction SQLite statements of
-# apply. Keeps #45's own publications off the target, #44's --wal-workers,
-# #43's statement cache, #40's compare progress, #39's --defer-indexes, #38's
+# ydixken/pgcopydb#51 adds performance mode, which --follow-mode selects:
+# receive writes a raw spool, and one worker applies from it in commit order.
+# Keeps #54's reply when receive reads a new endpos, #50's every transaction
+# in stream apply --target -, #49's BEGIN that pgoutput sends at 0/0, #48's
+# UPDATE and DELETE on the named table only, #47's apply statement cache,
+# #45's own publications off the target, #44's --wal-workers, #43's statement
+# cache, #40's compare progress, #39's --defer-indexes, #38's
 # leftover-constraint check, #35 to #37's all-databases resume, large objects,
 # long logs, SysV slots and quoted roles, #34's split-table resume, #33's
 # target keepalives, #32's snapshot refusal, #31's closed output.db fix, #27
@@ -19,10 +23,10 @@ FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc401
 # #14, #12, #11, #9.
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-168-ge8eec0f, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-357-gbed9234, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=e8eec0fe5b878970dd8eb19168b4acaaf7eff12e
-ARG PGCOPYDB_VERSION=0.18.168.ge8eec0f
+ARG PGCOPYDB_SHA=bed923445a3c581c1170cc77a1041cd52075569f
+ARG PGCOPYDB_VERSION=0.18.357.gbed9234
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.

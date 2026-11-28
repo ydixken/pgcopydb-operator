@@ -15,6 +15,7 @@ runner:
   # Exact pgcopydb versions allowed to run the in-pod progress poll. Fail
   # closed: any other runner version never runs it, an empty list disables it.
   progressPollVersions:
+    - "0.18.357.gbed9234"
     - "0.18.168.ge8eec0f"
     - "0.18.159.g9d8b660"
     - "0.18.157.g5fa0950"

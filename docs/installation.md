@@ -47,6 +47,8 @@ An operator release without the [retry gate](operations/lifecycle.md#the-retry-g
 > An older release also ignores `spec.target.synchronousCommit`, so the commits of the copy wait for a synchronous standby again.
 > It also runs no retry gate, so retries start without a wait for the sessions of a cut worker.
 > After you upgrade again, check that `spec.target.synchronousCommit` is still set, because the older CRD can drop the field.
+> An older release also drops `spec.follow.mode`, so its runner resumes a `performance` work directory in `sqlite` mode and refuses it at each retry.
+> Before a downgrade, let each Migration with `mode: performance` complete, or delete it.
 
 ### API versions
 

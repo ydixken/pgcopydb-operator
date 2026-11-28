@@ -5,7 +5,7 @@ Read the keywords MUST, SHOULD, and MAY as RFC 2119 describes them.
 
 This page covers the base clone (`pgcopydb clone`), the whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 The ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/).
-For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/e8eec0fe5b878970dd8eb19168b4acaaf7eff12e).
+For all-databases behavior, partition comparison, and row-level security, it is also the [pinned fork](https://github.com/ydixken/pgcopydb/tree/bed923445a3c581c1170cc77a1041cd52075569f).
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record the scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot check.
 
@@ -74,9 +74,15 @@ The check matches that description, not only the flag name, because another pgco
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twenty-four pgcopydb versions, with different guarantees.
+The progress poll supports twenty-five pgcopydb versions, with different guarantees.
 
-The bundled runner, `0.18.168.ge8eec0f`, keeps the seven per-transaction SQLite statements of apply prepared, so apply uses less CPU ([fork PR #47](https://github.com/ydixken/pgcopydb/pull/47)).
+The bundled runner, `0.18.357.gbed9234`, accepts `--follow-mode` and can follow on the raw change spool ([fork PR #51](https://github.com/ydixken/pgcopydb/pull/51)).
+It applies an `UPDATE` or a `DELETE` to the named table only ([fork PR #48](https://github.com/ydixken/pgcopydb/pull/48)).
+It stores a `BEGIN` that `pgoutput` sends at `0/0` at the LSN of its first change ([fork PR #49](https://github.com/ydixken/pgcopydb/pull/49)).
+`pgcopydb stream apply --target -` prints every transaction ([fork PR #50](https://github.com/ydixken/pgcopydb/pull/50)).
+Receive asks the source for a reply when it reads a new endpos ([fork PR #54](https://github.com/ydixken/pgcopydb/pull/54)).
+
+`0.18.168.ge8eec0f` and later runners keep the seven per-transaction SQLite statements of apply prepared, so apply uses less CPU ([fork PR #47](https://github.com/ydixken/pgcopydb/pull/47)).
 
 `0.18.159.g9d8b660` and later runners do not copy the publications that pgcopydb creates on the source to the target ([fork PR #45](https://github.com/ydixken/pgcopydb/pull/45)).
 These are the automatic publication or, with `spec.follow.walWorkers` above 1, the per-table publications `<slot>_t<table oid>`.
@@ -86,6 +92,9 @@ Other publications of the source, which include a publication that `spec.follow.
 `0.18.157.g5fa0950` added [WAL workers](#wal-workers) ([fork PR #44](https://github.com/ydixken/pgcopydb/pull/44)).
 With `0.18.144.g86bf908` and older runners, preflight refuses `spec.follow.walWorkers` above 1, because their `pgcopydb clone --help` does not list `--wal-workers`.
 `0.18.157.g5fa0950` also keeps the SQLite statements of receive and apply prepared, so receive uses less CPU ([fork PR #43](https://github.com/ydixken/pgcopydb/pull/43)).
+
+A Migration with `sqlite` or no [follow mode](#follow-mode) gets no new setting, so a `spec.runner.image` pin to the runner of v0.27.0 or v0.28.0 (`0.18.159.g9d8b660`) continues to operate.
+With a runner whose `pgcopydb clone --help` does not list `--follow-mode`, preflight refuses `spec.follow.mode: performance` ([Follow mode](#follow-mode)).
 
 `0.18.144.g86bf908` added the compare progress lines.
 `pgcopydb compare data` logs a `compare progress:` line of JSON counters when its workers start, then every 10 seconds.
@@ -154,6 +163,7 @@ A retry that finds the slot of an earlier attempt and still has tables to copy s
 `0.18.98.g944abcc` copies the tables of either retry under a newer snapshot, and apply can then stop on a duplicate key ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378)).
 
 `0.18.98.g944abcc` added the closed `output.db` fix.
+This fix is about [`sqlite` mode](../configuration.md#follow-mode), which keeps the `output.db` files.
 During streaming, apply stays on an `output.db` that receive closed, until apply applies every committed transaction in that file.
 `0.18.94.gbaa94ee` can move to the next file and skip those transactions ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 
@@ -601,13 +611,14 @@ See [All databases configuration](../configuration.md#all-databases) and [the ex
 Before the first attempt, and after the connectivity probes, the preflight Job also checks the requirements of this section:
 
 - `wal_level`.
+- With `mode: performance`, [follow mode](#follow-mode) support in the runner.
 - Free-slot headroom, or the [WAL worker](#wal-workers) headroom.
 - `wal_sender_timeout`, which only warns.
 - The source role's REPLICATION attribute.
 - EXECUTE on the origin functions.
 - The `session_replication_role` SET privilege.
-- An audit of every user table for a usable replica identity.
 - An audit of the tables in scope for unlogged tables.
+- An audit of every user table for a usable replica identity.
 
 A failed check fails the Migration before any data moves.
 The `Validated` condition message then gives the exact missing GRANT, setting, or table list.
@@ -771,6 +782,25 @@ Schema and workload contract:
   `compare data` covers tables, not `pg_largeobject`, so `Verified` stays `True`.
   The [`limitations/large_object_change`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Sequences need no action: pgcopydb re-syncs them automatically after cutover.
+
+### Follow mode
+
+With [`spec.follow.mode: performance`](../configuration.md#follow-mode), preflight makes sure that `pgcopydb clone --help` of the runner image lists `--follow-mode`.
+An older pgcopydb ignores `PGCOPYDB_FOLLOW_MODE` and follows in sqlite mode with no error.
+Thus, when the flag is not in the help, preflight fails the Migration with reason `PreflightFailed`, and the condition message names the runner image.
+To fix the failure, do one of these steps, then create a new Migration:
+
+- Delete the `spec.runner.image` pin, so that the Migration uses the bundled runner.
+- Delete `spec.follow.mode`, so that the Migration uses sqlite mode.
+
+With `sqlite` or no mode, preflight does not do this check.
+
+The work volume records the mode of the run that started it, and pgcopydb refuses a run that brings the other mode.
+The operator reports that refusal as the terminal reason `WorkDirLayoutRefused` ([Phase `Failed` with reason `WorkDirLayoutRefused`](../troubleshooting.md#phase-failed-with-reason-workdirlayoutrefused)).
+A volume with no recorded mode counts as `sqlite`, so a Migration in sqlite mode does not meet this refusal.
+
+In `performance` mode, pgcopydb keeps no `output.db` and no `replay.db` file.
+The items of this page that name those files are therefore about `sqlite` mode.
 
 ### WAL workers
 

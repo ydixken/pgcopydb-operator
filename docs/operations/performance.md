@@ -10,7 +10,9 @@ Do not assume that the target is the bottleneck.
 ## Follow receive and apply
 
 The bundled pgcopydb carries the fork PRs that the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md) lists.
-Fork PRs #27 to #30, #43, and #47 raise its follow throughput:
+This section describes [`sqlite` mode](../configuration.md#follow-mode), which is the default.
+[Performance mode](#performance-follow-mode) uses a different receive and apply path, and the items of this section do not apply to it.
+Fork PRs #27 to #30, #43, and #47 raise the follow throughput of `sqlite` mode:
 
 1. Apply waits on the receive pipe only after a pass that found nothing to do.
    Apply also returns from the pipeline sync as soon as the sync result is in ([#27](https://github.com/ydixken/pgcopydb/pull/27)).
@@ -31,6 +33,18 @@ Fork PRs #27 to #30, #43, and #47 raise its follow throughput:
 Apply still sends each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement.
 Because of this, a burst of these DELETEs on such a table applies more slowly than on a keyed table.
 We did not measure that cost.
+
+### Performance follow mode
+
+[`spec.follow.mode: performance`](../configuration.md#follow-mode) replaces the SQLite store of `sqlite` mode.
+Receive appends the pgoutput stream unchanged to segment files on the work volume, and apply reads the changes from those segments.
+There is no `*-output.db` file, no `*-replay.db` file and no transform into SQLite.
+The mode uses one replication slot, and this release runs it at one WAL worker.
+
+This release gives no throughput recommendation for either mode.
+Mode `performance` is available on request only, and `sqlite` mode keeps the behaviour of the earlier releases.
+Measure your own workload in both modes before you select one.
+[Follow mode](../configuration.md#follow-mode) lists the cases in which the same source changes give a different target in the two modes.
 
 ### Apply groups
 

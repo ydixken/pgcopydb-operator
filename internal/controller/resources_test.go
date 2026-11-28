@@ -48,7 +48,7 @@ import (
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
 	pgoutputPlugin           = "pgoutput"
-	patchedVersionForTest    = "0.18.168.ge8eec0f"
+	patchedVersionForTest    = "0.18.357.gbed9234"
 	featureRunOwner          = "run-owner"
 	extensionFixtureName     = "citext"
 	extensionBuiltin         = "plpgsql"
@@ -263,21 +263,26 @@ func TestBuildJobGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got = append(got, '\n')
-			path := filepath.Join("testdata", "worker-job-"+name+".json")
-			if os.Getenv("UPDATE_GOLDEN") != "" {
-				if err := os.WriteFile(path, got, 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(want) != string(got) {
-				t.Fatalf("the worker Job drifted from %s; review the change, then rerun with UPDATE_GOLDEN=1 to accept it", path)
-			}
+			assertGolden(t, "worker-job-"+name+".json", append(got, '\n'))
 		})
+	}
+}
+
+// assertGolden compares got with testdata/name; UPDATE_GOLDEN=1 rewrites it first.
+func assertGolden(t *testing.T, name string, got []byte) {
+	t.Helper()
+	path := filepath.Join("testdata", name)
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(want) != string(got) {
+		t.Fatalf("the output drifted from %s; review the change, then rerun with UPDATE_GOLDEN=1 to accept it", path)
 	}
 }
 
@@ -365,6 +370,69 @@ func TestBuildJob_ApplyGroupTransactions(t *testing.T) {
 				t.Fatalf("PGCOPYDB_APPLY_GROUP_TXNS = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Only the worker Job of a performance Migration carries the mode; unset and sqlite render today's Jobs.
+func TestBuildJob_FollowModeEnv(t *testing.T) {
+	const name = "PGCOPYDB_FOLLOW_MODE"
+	migration := func(mode string, workers int32, tables ...string) *v1beta1.Migration {
+		m := passwordMigration()
+		m.Spec.Clone.NoOwner = true
+		m.Spec.Clone.OwnerAfterRestore = reownTestOwner
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Mode: mode, WalWorkers: workers, HighTrafficTables: tables}
+		return m
+	}
+	carries := func(job *batchv1.Job) bool {
+		return slices.ContainsFunc(job.Spec.Template.Spec.Containers, func(c corev1.Container) bool {
+			return slices.ContainsFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == name })
+		})
+	}
+	worker := func(m *v1beta1.Migration) *batchv1.Job {
+		t.Helper()
+		job, err := buildJob(m, "img", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	noOtherJob := func(m *v1beta1.Migration) {
+		t.Helper()
+		for kind, build := range nonWorkerJobs(m) {
+			job, err := build()
+			if err != nil {
+				t.Fatalf("%s: %v", kind, err)
+			}
+			if carries(job) {
+				t.Errorf("mode %q: %s Job carries %s", m.Spec.Follow.Mode, kind, name)
+			}
+		}
+	}
+
+	perf := migration(v1beta1.FollowModePerformance, 0)
+	if got := envValue(worker(perf).Spec.Template.Spec.Containers[0].Env, name); got != v1beta1.FollowModePerformance {
+		t.Errorf("performance worker Job: %s = %q, want performance", name, got)
+	}
+	noOtherJob(perf)
+
+	for _, tc := range []struct {
+		desc    string
+		workers int32
+		tables  []string
+	}{
+		{"one worker", 0, nil},
+		{"three workers", 3, []string{"public.ledger"}},
+	} {
+		unset := worker(migration("", tc.workers, tc.tables...))
+		sqlite := migration(v1beta1.FollowModeSQLite, tc.workers, tc.tables...)
+		if carries(unset) || carries(worker(sqlite)) {
+			t.Errorf("%s: a sqlite worker Job carries %s", tc.desc, name)
+		}
+		if !reflect.DeepEqual(worker(sqlite), unset) {
+			t.Errorf("%s: the sqlite worker Job differs from the one with the mode unset", tc.desc)
+		}
+		noOtherJob(sqlite)
+		noOtherJob(migration("", tc.workers, tc.tables...))
 	}
 }
 
@@ -512,8 +580,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.159.g9d8b660", "0.18.157.g5fa0950", "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.168.ge8eec0f|0.18.159.g9d8b660|0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.168.ge8eec0f", "0.18.159.g9d8b660", "0.18.157.g5fa0950", "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.357.gbed9234|0.18.168.ge8eec0f|0.18.159.g9d8b660|0.18.157.g5fa0950|0.18.144.g86bf908|0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -599,7 +667,7 @@ func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.159.g9d8b660", "0.18.157.g5fa0950", "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.168.ge8eec0f", "0.18.159.g9d8b660", "0.18.157.g5fa0950", "0.18.144.g86bf908", "0.18.136.gb42f560", "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()
@@ -1548,6 +1616,89 @@ func TestBuildPreflightJob_WalWorkersEnv(t *testing.T) {
 	}
 	if got := envValue(c.Env, "PREFLIGHT_HIGH_TRAFFIC_TABLES"); got != "public.orders\npublic.events" {
 		t.Fatalf("PREFLIGHT_HIGH_TRAFFIC_TABLES = %q", got)
+	}
+}
+
+// TestPreflightScriptFor_FollowMode pins that unset and sqlite keep today's script,
+// and that performance adds the runner probe right after the wal_level check and nothing else.
+func TestPreflightScriptFor_FollowMode(t *testing.T) {
+	m := superMigration()
+	off := preflightScriptFor(m)
+	if strings.Contains(off, pgcopydb.FollowModeFlag) {
+		t.Fatalf("an unset mode needs no runner probe:\n%s", off)
+	}
+	m.Spec.Follow.Mode = v1beta1.FollowModeSQLite
+	if preflightScriptFor(m) != off {
+		t.Fatal("mode sqlite must leave the script as it is with the mode unset")
+	}
+	m.Spec.Follow.Mode = v1beta1.FollowModePerformance
+	on := preflightScriptFor(m)
+	if !strings.Contains(on, walLevelBlock+followModeRunnerBlock) {
+		t.Fatalf("the probe must follow the wal_level check:\n%s", on)
+	}
+	if strings.Replace(on, followModeRunnerBlock, "", 1) != off {
+		t.Fatal("the probe must be the only difference")
+	}
+}
+
+// TestPreflightScript_FollowMode runs the probe against the help a runner's
+// pgcopydb prints; only a help that lists --follow-mode passes.
+func TestPreflightScript_FollowMode(t *testing.T) {
+	run := followPreflightHarness(t)
+	m := superMigration()
+	m.Spec.Follow.Mode = v1beta1.FollowModePerformance
+	script := preflightScriptFor(m)
+	// The option block of PGCOPYDB_CLONE_GETOPTS_HELP in our fork's
+	// src/bin/pgcopydb/cli_clone_follow.c at 9d8b660, the last runner without the mode.
+	old, err := os.ReadFile(filepath.Join("testdata", "clone-help-9d8b660.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		accepted = "ok: runner pgcopydb accepts --follow-mode"
+		failure  = "preflight: spec.follow.mode performance needs follow mode support," +
+			" and the pgcopydb in runner image img:old lacks it (pgcopydb clone --help does not list --follow-mode);" +
+			" remove the spec.runner.image pin, or recreate the Migration without spec.follow.mode"
+		modeLine = "  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n"
+	)
+	t.Run("a help that lists the flag passes", func(t *testing.T) {
+		out, code, _ := run(t, script, "", "PGCOPYDB_STUB_HELP="+string(old)+modeLine, "PREFLIGHT_RUNNER_IMAGE=img:old")
+		if code != 0 || !strings.Contains(out, accepted) || !strings.Contains(out, preflightAllChecksPassed) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	for _, tc := range []struct{ name, help, exit string }{
+		// It lists --follow, so a probe for a shorter token passes it.
+		{"the 9d8b660 help fails", string(old), "0"},
+		{"a runner without pgcopydb fails", "", "127"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, _ := run(t, script, "",
+				"PGCOPYDB_STUB_HELP="+tc.help, "PGCOPYDB_STUB_EXIT="+tc.exit, "PREFLIGHT_RUNNER_IMAGE=img:old")
+			if code != 1 || !strings.Contains(out, "preflight failed:") || !strings.Contains(out, failure) ||
+				strings.Contains(out, accepted) || strings.Contains(out, preflightAllChecksPassed) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		})
+	}
+}
+
+// TestBuildPreflightJob_FollowModeEnv pins that a performance Migration carries the
+// image its probe names, and an unset or sqlite mode adds no env.
+func TestBuildPreflightJob_FollowModeEnv(t *testing.T) {
+	for mode, want := range map[string]string{"": "", v1beta1.FollowModeSQLite: "", v1beta1.FollowModePerformance: testRunnerImage} {
+		m := superMigration()
+		m.Spec.Follow.Mode = mode
+		job, err := buildPreflightJob(m, testRunnerImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env := job.Spec.Template.Spec.Containers[0].Env
+		// envValue reads an absent and an empty variable alike, so presence is checked on its own.
+		set := slices.ContainsFunc(env, func(e corev1.EnvVar) bool { return e.Name == runnerImageEnv })
+		if got := envValue(env, runnerImageEnv); set != (want != "") || got != want {
+			t.Fatalf("mode %q: %s set=%t value %q, want value %q", mode, runnerImageEnv, set, got, want)
+		}
 	}
 }
 

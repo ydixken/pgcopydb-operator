@@ -171,12 +171,14 @@ The operator owns the retry policy, so the Migration holds the attempt counts an
   A target out of disk space or shared memory keeps normal retries, because space or load can change between attempts.
 - A change that the apply cannot replay because the target does not have its column ends the Migration as `SchemaDrift` the same way.
   Usually, DDL ran on the source, and every retry would stop at the same change.
+- A work volume that records the other [follow mode](../configuration.md#follow-mode) ends the Migration as `WorkDirLayoutRefused` the same way.
+  pgcopydb refuses such a volume before it writes to it, and `spec.follow` is immutable, so every attempt sends the same mode again.
 
 When worker logs are readable, the `AttemptFailed` event names the pgcopydb error after each failed attempt.
 A start-over emits a `SnapshotLost` event in its place.
 The terminal `Failed` condition keeps that error when the budget is empty.
 When the log read fails, the operator retries it for two minutes after the Job fails.
-So a short API server outage does not cost the `PermissionDenied`, `DiskFull`, `SchemaDrift`, or `SnapshotLost` check.
+So a short API server outage does not cost the `PermissionDenied`, `DiskFull`, `SchemaDrift`, `SnapshotLost`, or `WorkDirLayoutRefused` check.
 After that time, the attempt retries without the check, and the event and the condition contain the read error instead.
 The log tail can contain a pg_restore database error before generic shutdown messages.
 In that case, retry events and the terminal `Failed` condition keep it, with the affected relation.

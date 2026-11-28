@@ -57,6 +57,7 @@ When the pod is already gone, the condition carries only the Job message.
 | [Phase `Failed`, reason `DiskFull`, after one attempt](#phase-failed-with-reason-diskfull) | Workers and cluster objects |
 | [Phase `Failed`, reason `SchemaDrift`, after one attempt](#phase-failed-with-reason-schemadrift) | Workers and cluster objects |
 | [Phase `Failed`, reason `SnapshotLost`](#phase-failed-with-reason-snapshotlost) | Workers and cluster objects |
+| [Phase `Failed`, reason `WorkDirLayoutRefused`](#phase-failed-with-reason-workdirlayoutrefused) | Workers and cluster objects |
 | [Status and metrics lag behind the worker](#status-updates-lag-behind-the-worker) | Workers and cluster objects |
 | [Scrapes return 401](#scrapes-return-401) | Metrics and dashboards |
 | [Scrapes return 403](#scrapes-return-403) | Metrics and dashboards |
@@ -807,8 +808,9 @@ Phase `Failed` with reason `DrainIncomplete` has two causes:
 For a missing origin, the Job stops before the compare, and its log shows the `psql` error that names the origin.
 For missing changes, `pgcopydb compare data` reported differing tables.
 The typical cause is a crash inside the drain window.
-After such a crash, pgcopydb `--resume` exits 0 without replaying.
-With a runner older than `0.18.98.g944abcc`, apply that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
+In [`sqlite` mode](configuration.md#follow-mode), pgcopydb `--resume` exits 0 after such a crash without replaying.
+In `performance` mode, the bundled runner records the drain as done only at its end, and a resume without that record continues to the cutover LSN.
+With a runner older than `0.18.98.g944abcc`, apply in `sqlite` mode that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 
 Do NOT switch applications to the target.
 No data is lost at the source: the slot stays and retains WAL.
@@ -981,12 +983,15 @@ Phase `Failed` with reason `DiskFull` after a single attempt means that the work
 The condition message carries the matched line.
 `database or disk is full` comes from pgcopydb's SQLite catalogs.
 `No space left on device` comes from a file that pgcopydb or pg_dump writes under the work directory.
+In [`performance` mode](configuration.md#follow-mode), a spool write that runs out of space gives the same `No space left on device` text.
+The worker then exits with an error, and the ERROR or FATAL line that carries the text names the `.seg` file that it could not write.
 
 Increase `spec.workVolume.size`.
 Then create a new Migration.
 A terminal state is absorbing (see [Retries and resume](operations/lifecycle.md#retries-and-resume)), so this Migration cannot resume.
 On a live migration, the change spool grows with source writes until cutover.
 So size the work volume for the writes that the migration has to carry.
+In `performance` mode, that spool is the raw pgoutput stream in segment files, and pgcopydb deletes a segment only after apply moved past its changes.
 
 When the target has no more disk space (`could not extend file`) or shared memory (`could not resize shared memory segment`), the reason is not `DiskFull`.
 Those attempts keep normal retries, because space or load on the target can change between attempts.
@@ -1026,6 +1031,28 @@ In the other order, that slot and origin would then belong to the new Migration.
 With `dropIfExists: true`, the operator starts over on its own and emits a `SnapshotLost` warning event.
 That attempt runs `pgcopydb stream cleanup` to drop the slot, the automatic publication, and the target origin.
 Then it runs `pgcopydb clone --follow --restart --drop-if-exists`.
+
+### Phase `Failed` with reason `WorkDirLayoutRefused`
+
+Phase `Failed` with reason `WorkDirLayoutRefused` means that pgcopydb refused the work volume before it wrote to it.
+The volume records the [follow mode](configuration.md#follow-mode) of the run that started it, and this attempt brought the other mode.
+The condition message carries the `Refusing the work directory: ...` line.
+That line names both modes.
+It also names the two ways that pgcopydb offers: a resume in the recorded mode, or a `pgcopydb stream cleanup` and a start from the beginning.
+
+The operator takes neither way, because `spec.follow` is immutable.
+Every attempt of the Migration sends the mode of its spec, so every attempt meets the same refusal.
+The Migration fails on the first attempt that meets it, and the retry budget stays unspent.
+
+The operator creates one work volume per Migration, and deletes it with the Migration.
+A volume with no recorded mode counts as `sqlite`.
+A Migration that starts on a new volume therefore does not meet this refusal.
+The reason reports a volume that holds the data of a run in the other mode.
+An example is a volume that a restore put back into the claim `<migration>-work`.
+
+Delete the failed Migration, which deletes its work volume.
+Then create a new Migration.
+To keep the data of the refused volume, give the new Migration a `spec.follow.mode` that is equal to the mode that the refusal names first.
 
 ### Status updates lag behind the worker
 

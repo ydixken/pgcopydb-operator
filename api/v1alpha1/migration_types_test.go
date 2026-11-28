@@ -108,6 +108,7 @@ func fullMigration() *Migration {
 				Publication: "pub", Wal2jsonNumericAsString: true,
 				ReplayNoOpUpdates:           true,
 				ApplyGroupTransactions:      50,
+				Mode:                        FollowModePerformance,
 				WalWorkers:                  2,
 				HighTrafficTables:           []string{"public.hot"},
 				AllowMissingReplicaIdentity: []string{"public.log"},
