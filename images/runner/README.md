@@ -227,7 +227,7 @@ The release gives no throughput recommendation for either mode.
 A work directory records the mode that started it, and a run with the other mode is refused rather than resumed.
 The build canary fails when `pgcopydb clone --help` does not list `--follow-mode`, and when the binary does not hold the refusal prefix that the operator matches.
 The pin also carries [#48](https://github.com/ydixken/pgcopydb/pull/48), [#49](https://github.com/ydixken/pgcopydb/pull/49), [#50](https://github.com/ydixken/pgcopydb/pull/50) and [#54](https://github.com/ydixken/pgcopydb/pull/54), which landed on `v0.18-fixes` after `e8eec0f`.
-The pinned head `bed9234` passed [Run Tests `46112320881`](https://github.com/ydixken/pgcopydb/actions/runs/46112320881).
+The pinned head `bed9234` passed [Run Tests `46112320881`](https://github.com/ydixken/pgcopydb/actions/runs/46112320881) and [Nightly Tests `46112322741`](https://github.com/ydixken/pgcopydb/actions/runs/46112322741).
 
 The manager and chart allow `0.18.357.gbed9234`, `0.18.168.ge8eec0f`, `0.18.159.g9d8b660`, `0.18.157.g5fa0950`, `0.18.144.g86bf908`, `0.18.136.gb42f560`, `0.18.132.gd4a2db1`, `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
 We keep all twenty-four older versions so upgrading the operator does not suppress counters for existing workers.
